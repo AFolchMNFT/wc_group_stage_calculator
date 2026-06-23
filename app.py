@@ -35,6 +35,7 @@ for _k, _v in {
     "group_standings": {},
     "completed": [],
     "fixtures": [],
+    "elo_ratings": {},
     "sim_result": None,
     "matchup_probs": None,
     "last_updated": "",
@@ -220,20 +221,28 @@ def _fetch_data() -> None:
     # Auto-save to cache so the data is available offline next time
     try:
         from simulator import cache as _cache
-        _cache.save(tr, gs, comp, fix, _CACHE_PATH)
+        from simulator.elo_client import fetch_elo_ratings as _fetch_elo
+        _elo = {}
+        try:
+            _elo = _fetch_elo(tr)
+            st.session_state["elo_ratings"] = _elo
+        except Exception:
+            pass
+        _cache.save(tr, gs, comp, fix, _CACHE_PATH, elo_ratings=_elo or None)
     except Exception:
         pass  # cache write failure is non-fatal
 
 
 def _load_from_cache() -> None:
     from simulator import cache as _cache
-    tr, gs, comp, fix, cached_at = _cache.load(_CACHE_PATH)
+    tr, gs, comp, fix, cached_at, elo = _cache.load(_CACHE_PATH)
     st.session_state.update(
         loaded=True,
         team_registry=tr,
         group_standings=gs,
         completed=comp,
         fixtures=fix,
+        elo_ratings=elo,
         sim_result=None,
         matchup_probs=None,
         last_updated="",
@@ -321,6 +330,18 @@ def _run_sim(manual_results: dict, n_sims: int) -> None:
     from simulator import simulate
     from simulator.bracket import load_bracket, resolve_r32_matchups
     fixtures = _apply_custom_odds(st.session_state.fixtures)
+    model_cfg = _SETTINGS.get("model", {})
+    model_mode = model_cfg.get("mode", "blend")
+    elo_weight = model_cfg.get("elo_weight", 0.4)
+    elo_ratings = st.session_state.get("elo_ratings") or None
+    # If no Elo ratings in session, attempt a live fetch
+    if not elo_ratings:
+        try:
+            from simulator.elo_client import fetch_elo_ratings as _fe
+            elo_ratings = _fe(st.session_state.team_registry)
+            st.session_state["elo_ratings"] = elo_ratings
+        except Exception:
+            pass
     result = simulate.run(
         team_registry=st.session_state.team_registry,
         group_standings=st.session_state.group_standings,
@@ -329,6 +350,10 @@ def _run_sim(manual_results: dict, n_sims: int) -> None:
         n_simulations=n_sims,
         poisson_params=_POISSON,
         manual_results=manual_results,
+        model_mode=model_mode,
+        elo_weight=elo_weight,
+        elo_ratings=elo_ratings,
+        simulate_knockout=True,
     )
     bracket = load_bracket()
     st.session_state.sim_result = result
@@ -338,21 +363,20 @@ def _run_sim(manual_results: dict, n_sims: int) -> None:
 # ---- Sidebar ----
 with st.sidebar:
     st.title("⚽ WC 2026")
-    if _IS_LOCAL:
-        if st.button("🔄  Update Data from ESPN", use_container_width=True, type="primary"):
-            with st.spinner("Fetching live data…"):
-                try:
-                    _fetch_data()
-                    teams = st.session_state.team_registry
-                    completed = st.session_state.completed
-                    fixtures = st.session_state.fixtures
-                    st.success(
-                        f"Loaded {len(teams)} teams · "
-                        f"{len(completed)} completed · "
-                        f"{len(fixtures)} remaining"
-                    )
-                except Exception as exc:
-                    st.error(f"Fetch failed: {exc}")
+    if st.button("🔄  Fetch Results & Odds", use_container_width=True, type="primary"):
+        with st.spinner("Fetching live data…"):
+            try:
+                _fetch_data()
+                teams = st.session_state.team_registry
+                completed = st.session_state.completed
+                fixtures = st.session_state.fixtures
+                st.success(
+                    f"Loaded {len(teams)} teams · "
+                    f"{len(completed)} completed · "
+                    f"{len(fixtures)} remaining"
+                )
+            except Exception as exc:
+                st.error(f"Fetch failed: {exc}")
 
     if st.session_state.last_updated:
         st.caption(f"Last updated: {st.session_state.last_updated}")
@@ -402,7 +426,7 @@ if not st.session_state.loaded:
             st.error(f"Could not load cache: {exc}")
             st.stop()
     else:
-        st.info("Press **🔄 Update Data from ESPN** in the sidebar to load live standings and fixtures.")
+        st.info("Press **🔄 Fetch Results & Odds** in the sidebar to load live standings and fixtures.")
         st.stop()
 
 teams = st.session_state.team_registry
@@ -561,6 +585,7 @@ if missing_odds_fixtures:
                 st.session_state.completed,
                 _upd,
                 _CACHE_PATH,
+                elo_ratings=st.session_state.get("elo_ratings") or None,
             )
             st.success(
                 f"Saved odds for {_n_new} fixture(s) to cache. "
@@ -601,8 +626,54 @@ mexico_id: str | None = next(
     None,
 )
 
-tab_mex, tab_groups, tab_third, tab_annexe, tab_bracket, tab_scores, tab_how = st.tabs(
-    ["🇲🇽  Mexico's R32", "📊  Group Finish", "🏅  3rd Place", "📋  Annexe C", "🏆  Predicted Bracket", "⚽  Avg Scores", "ℹ️  How It Works"]
+
+def _compute_showcase_bracket(result, group_lineups: dict, elo_ratings: dict) -> dict:
+    """Run one deterministic showcase knockout simulation using modal group finishers.
+
+    Uses a fixed random seed so the display is stable across Streamlit re-renders.
+    Returns {match_id: {"home": team_id, "away": team_id, "home_g": int,
+                        "away_g": int, "winner": team_id, "round": str}}
+    """
+    import random as _rnd
+    from simulator.knockout import simulate_bracket_once as _sim_once
+    from simulator.r32_third_place import allocation as _r32_alloc
+
+    if not elo_ratings:
+        return {}
+
+    # Modal group ranks: most-likely finisher at each position per group
+    group_ranks_modal: dict[str, list[str]] = {}
+    for grp, positions in group_lineups.items():
+        group_ranks_modal[grp] = [positions.get(pos, "") for pos in sorted(positions.keys())]
+
+    # Best 8 = groups with highest 3rd-place qualification probability
+    thirds_sorted = sorted(
+        result.groups.keys(),
+        key=lambda g: -result.third_qualified_counts.get(g, 0),
+    )
+    best_8_modal = frozenset(thirds_sorted[:8])
+
+    try:
+        annexe_c_modal = _r32_alloc(best_8_modal)
+    except Exception:
+        annexe_c_modal = {}
+
+    rng = _rnd.Random(42)
+    try:
+        return _sim_once(
+            group_ranks=group_ranks_modal,
+            best_8_groups=best_8_modal,
+            annexe_c=annexe_c_modal,
+            elo_ratings=elo_ratings,
+            team_registry=result.teams,
+            rng=rng,
+        )
+    except Exception:
+        return {}
+
+
+tab_mex, tab_groups, tab_third, tab_annexe, tab_bracket, tab_knockout, tab_scores, tab_how = st.tabs(
+    ["🇲🇽  Mexico's R32", "📊  Group Finish", "🏅  3rd Place", "📋  Annexe C", "🏆  Predicted Bracket", "⚽  Knockout Odds", "📈  Avg Scores", "ℹ️  How It Works"]
 )
 
 # ---- Mexico tab ----
@@ -620,56 +691,125 @@ with tab_mex:
         if not opps:
             st.info("No R32 matchup data available for Mexico.")
         else:
-            sorted_opps = [(oid, p) for oid, p in sorted(opps.items(), key=lambda x: -x[1]) if p > 0.001]
-            max_p = sorted_opps[0][1] if sorted_opps else 1.0
+            from collections import defaultdict as _dd
 
-            for rank, (opp_id, prob) in enumerate(sorted_opps[:15]):
-                opp = result.teams.get(opp_id)
-                if opp is None:
-                    continue
-                pct = prob * 100
-                bar_w = prob / max_p * 100
-                color = "#1b5e20" if rank == 0 else ("#388e3c" if rank < 3 else "#78909c")
-                weight = "bold" if rank < 3 else "normal"
+            # Group opponents by their group letter
+            _by_grp: dict[str, list] = _dd(list)
+            for _oid, _p in opps.items():
+                if _p > 0.001:
+                    _opp = result.teams.get(_oid)
+                    if _opp:
+                        _by_grp[_opp.group].append((_oid, _p))
+
+            _grp_totals = {g: sum(p for _, p in ts) for g, ts in _by_grp.items()}
+            _sorted_grps = sorted(_by_grp.keys(), key=lambda g: -_grp_totals[g])
+            _max_p = max((p for ts in _by_grp.values() for _, p in ts), default=1.0)
+
+            # Distinct highlight color per group
+            _GRP_PALETTE = {
+                "C": ("#1565c0", "#e3f2fd"),
+                "E": ("#00695c", "#e0f2f1"),
+                "F": ("#bf360c", "#fff3e0"),
+                "H": ("#4a148c", "#f3e5f5"),
+                "I": ("#b71c1c", "#ffebee"),
+            }
+            _DEF_COLOR = ("#424242", "#f5f5f5")
+
+            for _grp in _sorted_grps:
+                _grp_teams = sorted(_by_grp[_grp], key=lambda x: -x[1])
+                _total_pct = _grp_totals[_grp] * 100
+                _bar_clr, _bg_clr = _GRP_PALETTE.get(_grp, _DEF_COLOR)
+
                 st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:12px;margin:4px 0'>"
-                    f"<div style='min-width:230px;font-weight:{weight}'>"
-                    f"{opp.name}"
-                    f"<span style='color:#aaa;font-size:0.85em'> (Grp {opp.group})</span>"
-                    f"</div>"
-                    f"<div style='flex:1;background:#e8e8e8;border-radius:4px;height:20px'>"
-                    f"<div style='background:{color};width:{bar_w:.1f}%;height:100%;border-radius:4px'></div>"
-                    f"</div>"
-                    f"<div style='min-width:48px;text-align:right;font-weight:{weight}'>"
-                    f"{pct:.1f}%"
-                    f"</div>"
+                    f"<div style='background:{_bg_clr};border-left:4px solid {_bar_clr};"
+                    f"padding:8px 12px;margin:14px 0 6px 0;border-radius:4px;'>"
+                    f"<b style='color:{_bar_clr};font-size:1em'>Group {_grp}</b>"
+                    f"<span style='color:#666;font-size:0.88em;margin-left:10px'>"
+                    f"combined {_total_pct:.1f}%</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
 
+                for _oid, _prob in _grp_teams:
+                    _opp = result.teams.get(_oid)
+                    if _opp is None:
+                        continue
+                    _pct = _prob * 100
+                    _bw = _prob / _max_p * 100
+                    _fw = "bold" if _pct >= 5 else "normal"
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:12px;margin:4px 0 4px 12px'>"
+                        f"<div style='min-width:200px;font-weight:{_fw}'>{_opp.name}</div>"
+                        f"<div style='flex:1;background:#e8e8e8;border-radius:4px;height:20px'>"
+                        f"<div style='background:{_bar_clr};width:{_bw:.1f}%;height:100%;border-radius:4px'></div>"
+                        f"</div>"
+                        f"<div style='min-width:48px;text-align:right;font-weight:{_fw}'>{_pct:.1f}%</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
 # ---- Group finish tab ----
 with tab_groups:
     st.header(f"Group Finish Probabilities  ({n:,} simulations)")
-    rows = []
-    for gl in sorted(result.groups):
-        for tid in result.groups[gl]:
-            fc = result.group_finish_counts.get(tid, {})
-            team = result.teams.get(tid)
-            rows.append({
-                "Group": gl,
-                "Team": team.name if team else tid,
-                "1st %": round(fc.get(1, 0) / n * 100, 1),
-                "2nd %": round(fc.get(2, 0) / n * 100, 1),
-                "3rd %": round(fc.get(3, 0) / n * 100, 1),
-                "Out %": round(fc.get(4, 0) / n * 100, 1),
-                "R32 %": round(result.r32_counts.get(tid, 0) / n * 100, 1),
-            })
-    df_groups = pd.DataFrame(rows)
+
+    # Per-group tables in a 4-column grid
+    _gl_list = sorted(result.groups.keys())
+    _ncols = 4
+    for _chunk_start in range(0, len(_gl_list), _ncols):
+        _chunk = _gl_list[_chunk_start : _chunk_start + _ncols]
+        _gcols = st.columns(len(_chunk))
+        for _ci, _gl in enumerate(_chunk):
+            with _gcols[_ci]:
+                st.markdown(f"**Group {_gl}**")
+                _grows = []
+                for _tid in result.groups[_gl]:
+                    _fc = result.group_finish_counts.get(_tid, {})
+                    _tm = result.teams.get(_tid)
+                    _grows.append({
+                        "Team": _tm.name if _tm else _tid,
+                        "1st %": round(_fc.get(1, 0) / n * 100, 1),
+                        "2nd %": round(_fc.get(2, 0) / n * 100, 1),
+                        "3rd %": round(_fc.get(3, 0) / n * 100, 1),
+                        "Out %": round(_fc.get(4, 0) / n * 100, 1),
+                        "R32 %": round(result.r32_counts.get(_tid, 0) / n * 100, 1),
+                    })
+                _grows.sort(key=lambda r: -r["R32 %"])
+                _df_g = pd.DataFrame(_grows)
+                st.dataframe(
+                    _df_g.style.background_gradient(subset=["R32 %"], cmap="Greens"),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=35 * len(_df_g) + 38,
+                )
+
+    st.divider()
+    st.subheader("Best 3rd-Place Teams")
+    st.caption("8 of 12 groups' 3rd-place teams qualify for the R32. The table shows each group's qualification probability.")
+    _third_rows = []
+    for _gl in sorted(result.groups):
+        _q_pct = result.third_qualified_counts.get(_gl, 0) / n * 100
+        _thirds = sorted(
+            [
+                (
+                    result.teams.get(tid).name if result.teams.get(tid) else tid,
+                    result.group_finish_counts.get(tid, {}).get(3, 0) / n * 100,
+                )
+                for tid in result.groups[_gl]
+            ],
+            key=lambda x: -x[1],
+        )
+        _cands_list = [(nm, p) for nm, p in _thirds if p > 0.5][:3]
+        _cands = ", ".join(f"{nm} {p:.0f}%" for nm, p in _cands_list)
+        _third_rows.append({
+            "Group": _gl,
+            "3rd Qualifies %": round(_q_pct, 1),
+            "Most Likely 3rd-Place Teams": _cands,
+        })
+    _df_third_g = pd.DataFrame(_third_rows)
     st.dataframe(
-        df_groups.style.background_gradient(subset=["R32 %"], cmap="Greens"),
+        _df_third_g.style.background_gradient(subset=["3rd Qualifies %"], cmap="Greens"),
         hide_index=True,
         use_container_width=True,
-        height=700,
     )
 
 # ---- 3rd place tab ----
@@ -760,14 +900,14 @@ with tab_annexe:
 with tab_bracket:
     from simulator.r32_third_place import SLOT_MATCH as _SM_B
 
-    st.header(f"Full Tournament Bracket — Predicted Lineup  ({n:,} simulations)")
+    st.header(f"Simulated Tournament Bracket  ({n:,} simulations)")
     st.caption(
-        "R32 slots: most likely team from the group-stage simulation. "
-        "R16 onward: the higher-probability R32 team is projected forward. "
-        "Mexico 🇲🇽 highlighted."
+        "R32 slots: most likely team from group-stage simulation. "
+        "R16 → Final: one representative Elo-model simulation (fixed seed 42). "
+        "Each match shows the simulated score; winner in green. Mexico 🇲🇽 highlighted."
     )
 
-    # ── Bracket topology (from world_cup_2026_bracket.json) ─────────────
+    # ── Bracket topology ─────────────────────────────────────────────────
     _R32_ORDER, _R16_PAIRS, _QF_PAIRS, _SF_PAIRS, _final_id, _bkt_r32_slots = _BRACKET_TOPOLOGY
 
     # ── Annexe C slot map: match_id -> (slot_key, winner_group) ─────────
@@ -806,33 +946,74 @@ with tab_bracket:
                     "slot": f"3rd Grp {_bg}", "pct": _oc[_bg] / _ot * 100}
         return {"name": "?", "slot": "3rd", "pct": 0.0}
 
-    # ── 32 team-row list ─────────────────────────────────────────────────
+    # ── Showcase simulation (one deterministic run, fixed seed) ──────────
+    # Computed BEFORE _bkt_rows so R32 display is driven by the same team
+    # assignments the simulation actually uses — keeping the bracket consistent.
+    _showcase = _compute_showcase_bracket(
+        result, _group_lineups, st.session_state.get("elo_ratings") or {}
+    )
+
+    def _r32_row_info(mid, slot_num):
+        """Return R32 row data using the showcase's actual team assignment.
+
+        This guarantees the team shown in the R32 column is exactly the team
+        that participates in the simulated R16/QF/SF/Final matches.  Falls back
+        to _slot_info (aggregate stats) when no showcase data is available.
+        """
+        _s_data = _showcase.get(mid, {})
+        _side = "home" if slot_num == 1 else "away"
+        _tid = _s_data.get(_side) if _s_data else None
+        if not _tid:
+            return _slot_info(mid, slot_num)
+        _t = result.teams.get(_tid)
+        if not _t:
+            return _slot_info(mid, slot_num)
+        # Derive the position label from how often this team finished at each rank
+        _fc = result.group_finish_counts.get(_tid, {})
+        _pos = max(range(1, 5), key=lambda p: _fc.get(p, 0)) if _fc else 1
+        _pct = _fc.get(_pos, 0) / result.n_simulations * 100
+        _lbl = f"3rd Grp {_t.group}" if _pos == 3 else f"{_pos}{_t.group}"
+        return {"name": _t.name, "slot": _lbl, "pct": _pct}
+
+    # ── 32 R32 team rows (from showcase for full bracket consistency) ─────
     _bkt_rows = []
     for _mid in _R32_ORDER:
-        _bkt_rows.append({**_slot_info(_mid, 1), "match": _mid})
-        _bkt_rows.append({**_slot_info(_mid, 2), "match": _mid})
+        _bkt_rows.append({**_r32_row_info(_mid, 1), "match": _mid})
+        _bkt_rows.append({**_r32_row_info(_mid, 2), "match": _mid})
 
-    # ── R32 predicted winner per match (higher slot pct) ─────────────────
-    _r32_w = {_bkt_rows[i]["match"]:
-              (_bkt_rows[i] if _bkt_rows[i]["pct"] >= _bkt_rows[i+1]["pct"] else _bkt_rows[i+1])
-              for i in range(0, 32, 2)}
+    def _ko_cell(mid, rowspan):
+        """Build an HTML <td> showing the simulated match score for a knockout match."""
+        data = _showcase.get(mid, {})
+        if data:
+            _h_id = data["home"]
+            _a_id = data["away"]
+            _hg = data["home_g"]
+            _ag = data["away_g"]
+            _win_id = data["winner"]
+            _h_t = result.teams.get(_h_id)
+            _a_t = result.teams.get(_a_id)
+            _h_name = _h_t.name if _h_t else _h_id
+            _a_name = _a_t.name if _a_t else _a_id
+            _is_m = _bkt_mex(_h_name) or _bkt_mex(_a_name)
+            _h_s = "font-weight:bold;color:#1b5e20" if _win_id == _h_id else "color:#999"
+            _a_s = "font-weight:bold;color:#1b5e20" if _win_id == _a_id else "color:#999"
+            _content = (
+                f'<div style="color:#aaa;font-size:0.70em;margin-bottom:2px">{mid}</div>'
+                f'<div style="{_h_s}">{_bkt_esc(_h_name)}&nbsp;<b>{_hg}</b></div>'
+                f'<div style="color:#ccc;font-size:0.72em;margin:1px 0">&#8211;</div>'
+                f'<div style="{_a_s}"><b>{_ag}</b>&nbsp;{_bkt_esc(_a_name)}</div>'
+            )
+        else:
+            _is_m = False
+            _content = f'<div style="color:#aaa;font-size:0.70em">{mid}</div><div style="color:#bbb">–</div>'
+        _bg = "background:#edf7ed;border:1.5px solid #1b5e20;" if _is_m else "background:#f8f8f8;border:1px solid #e0e0e0;"
+        return (
+            f'<td rowspan="{rowspan}" style="vertical-align:middle;text-align:center;'
+            f'padding:4px 6px;font-size:0.78em;min-width:108px;{_bg}border-radius:4px;">'
+            f'{_content}</td>'
+        )
 
-    # ── Project forward through bracket ──────────────────────────────────
-    def _project(pairs, src):
-        t1 = {m: src.get(a, {"name":"?","pct":0}) for m,a,b in pairs}
-        t2 = {m: src.get(b, {"name":"?","pct":0}) for m,a,b in pairs}
-        w  = {m: (t1[m] if t1[m]["pct"] >= t2[m]["pct"] else t2[m]) for m,_,__ in pairs}
-        return t1, t2, w
-
-    _r16_t1, _r16_t2, _r16_w = _project(_R16_PAIRS, _r32_w)
-    _qf_t1,  _qf_t2,  _qf_w  = _project(_QF_PAIRS,  _r16_w)
-    _sf_t1,  _sf_t2,  _sf_w  = _project(_SF_PAIRS,   _qf_w)
-    _sf1_id, _sf2_id = _SF_PAIRS[0][0], _SF_PAIRS[1][0]
-    _fin_t1 = _sf_w.get(_sf1_id, {"name":"?","pct":0})
-    _fin_t2 = _sf_w.get(_sf2_id, {"name":"?","pct":0})
-    _fin_w  = _fin_t1 if _fin_t1["pct"] >= _fin_t2["pct"] else _fin_t2
-
-    # ── HTML bracket table (32 rows, 5 columns with rowspan) ─────────────
+    # ── HTML bracket table (32 rows × 5 columns with rowspan) ────────────
     _brows = []
     for _ri in range(32):
         _rd   = _bkt_rows[_ri]
@@ -843,99 +1024,189 @@ with tab_bracket:
                   else ("1px solid #eee" if _is_last_in_match else "none"))
 
         _r32_td = (
-            f'<td style="padding:3px 6px; font-size:0.78em; vertical-align:middle;'
-            f' max-width:155px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'
-            f' border-bottom:{_bdr_b};'
-            f' {"background:#edf7ed; border-left:3px solid #1b5e20;" if _is_m else "border-left:2px solid #e8e8e8;"}'
+            f'<td style="padding:3px 6px;font-size:0.78em;vertical-align:middle;'
+            f'max-width:155px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+            f'border-bottom:{_bdr_b};'
+            f'{"background:#edf7ed;border-left:3px solid #1b5e20;" if _is_m else "border-left:2px solid #e8e8e8;"}'
             f'">'
             f'{"🇲🇽 " if _is_m else ""}<b>{_bkt_esc(_rd["name"])}</b>'
-            f' <span style="color:#999; font-size:0.82em;">{_rd["slot"]} {_rd["pct"]:.0f}%</span>'
+            f'<span style="color:#999;font-size:0.82em"> {_rd["slot"]} {_rd["pct"]:.0f}%</span>'
             f'</td>'
         )
         _row = f'<tr style="height:22px;">{_r32_td}'
 
         if _ri % 4 == 0:
-            _r16m, _r32a, _r32b = _R16_PAIRS[_ri // 4]
-            _a, _b = _r16_t1[_r16m], _r16_t2[_r16m]
-            _mm = _bkt_mex(_a["name"]) or _bkt_mex(_b["name"])
-            _row += (
-                f'<td rowspan="4" style="vertical-align:middle; text-align:center;'
-                f' padding:4px 6px; font-size:0.78em; min-width:105px;'
-                f' {"background:#edf7ed; border:1.5px solid #1b5e20;" if _mm else "background:#f8f8f8; border:1px solid #e0e0e0;"}'
-                f' border-radius:4px;">'
-                f'<div style="color:#aaa; font-size:0.72em;">{_r16m}</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_a["name"])}</div>'
-                f'<div style="color:#bbb; font-size:0.72em;">vs</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_b["name"])}</div>'
-                f'</td>'
-            )
+            _r16m = _R16_PAIRS[_ri // 4][0]
+            _row += _ko_cell(_r16m, 4)
 
         if _ri % 8 == 0:
-            _qfm, _r16a, _r16b = _QF_PAIRS[_ri // 8]
-            _a, _b = _qf_t1[_qfm], _qf_t2[_qfm]
-            _mm = _bkt_mex(_a["name"]) or _bkt_mex(_b["name"])
-            _row += (
-                f'<td rowspan="8" style="vertical-align:middle; text-align:center;'
-                f' padding:4px 6px; font-size:0.78em; min-width:105px;'
-                f' {"background:#edf7ed; border:1.5px solid #1b5e20;" if _mm else "background:#f8f8f8; border:1px solid #e0e0e0;"}'
-                f' border-radius:4px;">'
-                f'<div style="color:#aaa; font-size:0.72em;">{_qfm}</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_a["name"])}</div>'
-                f'<div style="color:#bbb; font-size:0.72em;">vs</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_b["name"])}</div>'
-                f'</td>'
-            )
+            _qfm = _QF_PAIRS[_ri // 8][0]
+            _row += _ko_cell(_qfm, 8)
 
         if _ri % 16 == 0:
-            _sfm, _qfa, _qfb = _SF_PAIRS[_ri // 16]
-            _a, _b = _sf_t1[_sfm], _sf_t2[_sfm]
-            _mm = _bkt_mex(_a["name"]) or _bkt_mex(_b["name"])
-            _row += (
-                f'<td rowspan="16" style="vertical-align:middle; text-align:center;'
-                f' padding:4px 6px; font-size:0.78em; min-width:105px;'
-                f' {"background:#edf7ed; border:1.5px solid #1b5e20;" if _mm else "background:#f8f8f8; border:1px solid #e0e0e0;"}'
-                f' border-radius:4px;">'
-                f'<div style="color:#aaa; font-size:0.72em;">{_sfm}</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_a["name"])}</div>'
-                f'<div style="color:#bbb; font-size:0.72em;">vs</div>'
-                f'<div style="font-weight:bold;">{_bkt_esc(_b["name"])}</div>'
-                f'</td>'
-            )
+            _sfm = _SF_PAIRS[_ri // 16][0]
+            _row += _ko_cell(_sfm, 16)
 
         if _ri == 0:
-            _row += (
-                f'<td rowspan="32" style="vertical-align:middle; text-align:center;'
-                f' padding:10px; font-size:0.8em; min-width:115px;'
-                f' background:#fffde7; border:2px solid #ffd700; border-radius:6px;">'
-                f'<div style="color:#aaa; font-size:0.72em; margin-bottom:4px;">{_final_id} · Final</div>'
-                f'<div style="font-weight:bold; font-size:0.9em;">{_bkt_esc(_fin_t1["name"])}</div>'
-                f'<div style="color:#bbb; margin:3px 0; font-size:0.76em;">vs</div>'
-                f'<div style="font-weight:bold; font-size:0.9em;">{_bkt_esc(_fin_t2["name"])}</div>'
-                f'<div style="margin-top:10px; padding-top:6px; border-top:1px solid #e8d000;">'
-                f'<div style="color:#888; font-size:0.72em;">Predicted winner</div>'
-                f'<div style="font-weight:bold; font-size:0.95em; color:#1b5e20;">🏆 {_bkt_esc(_fin_w["name"])}</div>'
-                f'</div></td>'
-            )
+            _fin_data = _showcase.get(_final_id, {})
+            if _fin_data:
+                _fh_t = result.teams.get(_fin_data["home"])
+                _fa_t = result.teams.get(_fin_data["away"])
+                _fw_t = result.teams.get(_fin_data["winner"])
+                _fh_name = _fh_t.name if _fh_t else "?"
+                _fa_name = _fa_t.name if _fa_t else "?"
+                _fw_name = _fw_t.name if _fw_t else "?"
+                _fhg, _fag = _fin_data["home_g"], _fin_data["away_g"]
+                _fh_s = "font-weight:bold;color:#1b5e20" if _fin_data["winner"] == _fin_data["home"] else "color:#999"
+                _fa_s = "font-weight:bold;color:#1b5e20" if _fin_data["winner"] == _fin_data["away"] else "color:#999"
+                _row += (
+                    f'<td rowspan="32" style="vertical-align:middle;text-align:center;'
+                    f'padding:10px;font-size:0.8em;min-width:115px;'
+                    f'background:#fffde7;border:2px solid #ffd700;border-radius:6px;">'
+                    f'<div style="color:#aaa;font-size:0.72em;margin-bottom:4px">{_final_id} · Final</div>'
+                    f'<div style="{_fh_s}">{_bkt_esc(_fh_name)}&nbsp;<b>{_fhg}</b></div>'
+                    f'<div style="color:#bbb;margin:3px 0;font-size:0.76em">&#8211;</div>'
+                    f'<div style="{_fa_s}"><b>{_fag}</b>&nbsp;{_bkt_esc(_fa_name)}</div>'
+                    f'<div style="margin-top:10px;padding-top:6px;border-top:1px solid #e8d000">'
+                    f'<div style="color:#888;font-size:0.72em">Simulated winner</div>'
+                    f'<div style="font-weight:bold;font-size:0.95em;color:#1b5e20">🏆 {_bkt_esc(_fw_name)}</div>'
+                    f'</div></td>'
+                )
+            else:
+                _row += (
+                    f'<td rowspan="32" style="vertical-align:middle;text-align:center;'
+                    f'padding:10px;font-size:0.8em;min-width:115px;'
+                    f'background:#fffde7;border:2px solid #ffd700;border-radius:6px;">'
+                    f'<div style="color:#aaa;font-size:0.72em">Final</div>'
+                    f'<div style="color:#bbb;font-size:0.8em">Run simulation to see result</div>'
+                    f'</td>'
+                )
 
         _row += "</tr>"
         _brows.append(_row)
 
     _bkt_html = (
-        '<div style="overflow-x:auto; padding:6px 0;">'
-        '<table style="border-collapse:separate; border-spacing:3px 1px;'
-        ' font-family:sans-serif; width:100%;">'
-        "<thead><tr style=\"font-size:0.78em; color:#555;\">"
-        "<th style=\"text-align:left; padding:4px 8px; border-bottom:2px solid #bbb;\">R32</th>"
-        "<th style=\"text-align:center; padding:4px 8px; border-bottom:2px solid #bbb;\">R16</th>"
-        "<th style=\"text-align:center; padding:4px 8px; border-bottom:2px solid #bbb;\">QF</th>"
-        "<th style=\"text-align:center; padding:4px 8px; border-bottom:2px solid #bbb;\">SF</th>"
-        "<th style=\"text-align:center; padding:4px 8px; border-bottom:2px solid #bbb;\">Final 🏆</th>"
+        '<div style="overflow-x:auto;padding:6px 0;">'
+        '<table style="border-collapse:separate;border-spacing:3px 1px;'
+        'font-family:sans-serif;width:100%;">'
+        "<thead><tr style=\"font-size:0.78em;color:#555;\">"
+        "<th style=\"text-align:left;padding:4px 8px;border-bottom:2px solid #bbb\">R32</th>"
+        "<th style=\"text-align:center;padding:4px 8px;border-bottom:2px solid #bbb\">R16</th>"
+        "<th style=\"text-align:center;padding:4px 8px;border-bottom:2px solid #bbb\">QF</th>"
+        "<th style=\"text-align:center;padding:4px 8px;border-bottom:2px solid #bbb\">SF</th>"
+        "<th style=\"text-align:center;padding:4px 8px;border-bottom:2px solid #bbb\">Final 🏆</th>"
         "</tr></thead><tbody>"
         + "".join(_brows)
         + "</tbody></table></div>"
     )
     st.markdown(_bkt_html, unsafe_allow_html=True)
 
+
+# ---- Knockout Odds tab ----
+with tab_knockout:
+    st.header(f"Knockout Stage — Monte Carlo Results  ({n:,} simulations)")
+
+    has_ko = bool(result.ko_match_stats)
+    if not has_ko:
+        st.info(
+            "No knockout data available. Re-run the simulation to generate full-tournament "
+            "probabilities (requires Elo ratings to be loaded)."
+        )
+    else:
+        _ko_stats = result.ko_match_stats
+
+        # Helper: pick modal team (most common) from a {team_id: count} dict
+        def _modal(team_counts: dict) -> tuple[str, int]:
+            if not team_counts:
+                return "", 0
+            best = max(team_counts, key=team_counts.get)
+            return best, team_counts[best]
+
+        _ROUND_LABELS = {
+            "round_of_32":   ("R32",    "Round of 32"),
+            "round_of_16":   ("R16",    "Round of 16"),
+            "quarter_finals": ("QF",    "Quarter-Finals"),
+            "semi_finals":   ("SF",     "Semi-Finals"),
+            "final":         ("Final",  "Final 🏆"),
+        }
+
+        for rnd_key, (rnd_short, rnd_label) in _ROUND_LABELS.items():
+            # Gather matches for this round from ko_match_stats
+            rnd_matches = sorted(
+                [(mid, ms) for mid, ms in _ko_stats.items() if ms.get("round") == rnd_key],
+                key=lambda x: x[0],
+            )
+            if not rnd_matches:
+                continue
+
+            st.subheader(rnd_label)
+
+            _rows = []
+            for mid, ms in rnd_matches:
+                played = ms["played"]
+                if played == 0:
+                    continue
+
+                h_modal_id, h_modal_cnt = _modal(ms["home_teams"])
+                a_modal_id, a_modal_cnt = _modal(ms["away_teams"])
+                h_modal_t = result.teams.get(h_modal_id)
+                a_modal_t = result.teams.get(a_modal_id)
+                h_name = h_modal_t.name if h_modal_t else h_modal_id
+                a_name = a_modal_t.name if a_modal_t else a_modal_id
+
+                avg_hg = ms["home_goals_sum"] / played
+                avg_ag = ms["away_goals_sum"] / played
+                home_win_pct = ms["home_slot_wins"] / played * 100
+                away_win_pct = 100 - home_win_pct
+
+                _rows.append({
+                    "Match": mid,
+                    "Home (most likely)": f"{h_name} ({h_modal_cnt / played * 100:.0f}%)",
+                    "Exp. Score": f"{avg_hg:.2f} – {avg_ag:.2f}",
+                    "Away (most likely)": f"{a_name} ({a_modal_cnt / played * 100:.0f}%)",
+                    "Home Slot Win %": round(home_win_pct, 1),
+                    "Away Slot Win %": round(away_win_pct, 1),
+                    "Sims Played": played,
+                })
+
+            if _rows:
+                _df_rnd = pd.DataFrame(_rows)
+                st.dataframe(
+                    _df_rnd.style.background_gradient(
+                        subset=["Home Slot Win %"], cmap="RdYlGn", vmin=0, vmax=100
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=35 * len(_df_rnd) + 38,
+                )
+
+        st.divider()
+        st.subheader("Championship Probabilities")
+        st.caption("Team-level probabilities aggregated across all simulation runs.")
+        rows_ko = []
+        for tid, team in result.teams.items():
+            champ = result.champion_counts.get(tid, 0)
+            r32 = result.r32_counts.get(tid, 0)
+            if r32 == 0 and champ == 0:
+                continue
+            rows_ko.append({
+                "Team": team.name,
+                "Group": team.group,
+                "R32 %": round(r32 / n * 100, 1),
+                "R16 %": round(result.r16_counts.get(tid, 0) / n * 100, 1),
+                "QF %":  round(result.qf_counts.get(tid, 0) / n * 100, 1),
+                "SF %":  round(result.sf_counts.get(tid, 0) / n * 100, 1),
+                "Final %": round(result.final_counts.get(tid, 0) / n * 100, 1),
+                "Win %":   round(champ / n * 100, 1),
+            })
+        rows_ko.sort(key=lambda r: -r["Win %"])
+        df_ko = pd.DataFrame(rows_ko)
+        st.dataframe(
+            df_ko.style.background_gradient(subset=["Win %"], cmap="Greens"),
+            hide_index=True,
+            use_container_width=True,
+            height=min(800, 35 * len(df_ko) + 38),
+        )
 
 # ---- Avg Scores tab ----
 with tab_scores:

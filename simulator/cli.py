@@ -10,6 +10,7 @@ from rich.panel import Panel
 
 from simulator import espn_client, odds_client, report, simulate
 from simulator.bracket import has_unverified, load_bracket
+from simulator.elo_client import fetch_elo_ratings
 from simulator.paths import CONFIG_DIR, ENV_FILE
 
 
@@ -25,6 +26,18 @@ def main():
     parser.add_argument("--fallback", action="store_true", help="Use config/standings.json instead of ESPN API")
     parser.add_argument("--odds-key", default=None, help="The Odds API key (or set ODDS_API_KEY env var)")
     parser.add_argument("--no-sweepstake", action="store_true", help="Skip the sweepstake participant report")
+    parser.add_argument(
+        "--model", choices=["odds", "elo", "blend"], default=None,
+        help="Prediction model: 'odds' (betting only), 'elo' (Elo+factors), 'blend' (default, weighted mix)",
+    )
+    parser.add_argument(
+        "--elo-weight", type=float, default=None,
+        help="Elo model weight in blend mode 0.0–1.0 (default from settings.json, typically 0.4)",
+    )
+    parser.add_argument(
+        "--no-knockout", action="store_true",
+        help="Skip full-tournament knockout simulation (group stage only)",
+    )
     args = parser.parse_args()
 
     console = Console()
@@ -39,6 +52,11 @@ def main():
     poisson_params = settings.get("poisson_lambdas")
     start_date = settings.get("group_stage_start", "20260611")
     end_date = settings.get("group_stage_end", "20260627")
+
+    model_cfg = settings.get("model", {})
+    model_mode = args.model or model_cfg.get("mode", "blend")
+    elo_weight = args.elo_weight if args.elo_weight is not None else model_cfg.get("elo_weight", 0.4)
+    simulate_knockout = not args.no_knockout
 
     bracket = load_bracket()
     if has_unverified(bracket):
@@ -72,6 +90,19 @@ def main():
         f"{len(completed)} completed matches, {len(fixtures)} remaining.[/green]"
     )
 
+    # Fetch Elo ratings (used by Elo/blend model and always for knockout stage)
+    elo_ratings: dict = {}
+    if model_mode in ("elo", "blend") or simulate_knockout:
+        console.print("[cyan]Fetching Elo ratings from eloratings.net…[/cyan]")
+        try:
+            elo_ratings = fetch_elo_ratings(team_registry)
+            console.print(f"[green]Loaded Elo ratings for {len(elo_ratings)} teams.[/green]")
+        except Exception as exc:
+            console.print(f"[yellow]Elo fetch failed: {exc}. Using fallback ratings.[/yellow]")
+            from simulator.elo_client import _FALLBACK_ELO, fetch_elo_ratings_by_abb
+            abb_to_id = {t.abbreviation.upper(): tid for tid, t in team_registry.items()}
+            elo_ratings = {abb_to_id[a]: r for a, r in _FALLBACK_ELO.items() if a in abb_to_id}
+
     if not args.no_odds:
         api_key = args.odds_key or os.environ.get("ODDS_API_KEY", "")
         if api_key:
@@ -88,7 +119,7 @@ def main():
                 "Set ODDS_API_KEY in .env or pass --odds-key.[/yellow]"
             )
 
-    console.print(f"[cyan]Running {n_sims:,} simulations…[/cyan]")
+    console.print(f"[cyan]Running {n_sims:,} simulations (model={model_mode})…[/cyan]")
     result = simulate.run(
         team_registry=team_registry,
         group_standings=group_standings,
@@ -97,6 +128,10 @@ def main():
         n_simulations=n_sims,
         poisson_params=poisson_params,
         seed=args.seed,
+        model_mode=model_mode,
+        elo_weight=elo_weight,
+        elo_ratings=elo_ratings or None,
+        simulate_knockout=simulate_knockout,
     )
     console.print("[green]Simulation complete.[/green]\n")
 
@@ -105,8 +140,9 @@ def main():
     report.print_simulation_summary(result, console)
     console.print()
     report.print_third_place_summary(result, console)
-    console.print()
-    report.print_annexe_c_summary(result, console)
+    if simulate_knockout:
+        console.print()
+        report.print_knockout_summary(result, console)
 
     if not args.no_sweepstake:
         try:

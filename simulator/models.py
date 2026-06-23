@@ -1,4 +1,6 @@
+from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import Optional
 
 @dataclass
 class Team:
@@ -31,11 +33,14 @@ class MatchFixture:
     prob_away: float = 1 / 3
     # Per-fixture Poisson goal rates derived from the betting markets.
     # None until odds are loaded; simulate.py falls back to solve_lambdas() when absent.
-    lambda_home: float | None = None
-    lambda_away: float | None = None
+    lambda_home: Optional[float] = None
+    lambda_away: Optional[float] = None
     # True when lambda_home/away came from a real market (API or manually entered).
     # False when falling back to the default λ_total split.
     has_market_odds: bool = False
+    # Elo-model derived λ values (set when Elo model is active; for blending/transparency).
+    lambda_elo_home: Optional[float] = None
+    lambda_elo_away: Optional[float] = None
 
 
 @dataclass
@@ -71,3 +76,14 @@ class SimResult:
     # match_id -> (avg_home_goals, avg_away_goals) across all simulation runs.
     # Fixed/manual scores appear as exact floats; simulated as means.
     fixture_avg_goals: dict = field(default_factory=dict)
+    # Knockout round advancement counts (team_id -> count reaching that round)
+    r16_counts: dict = field(default_factory=dict)
+    qf_counts: dict = field(default_factory=dict)
+    sf_counts: dict = field(default_factory=dict)
+    final_counts: dict = field(default_factory=dict)
+    champion_counts: dict = field(default_factory=dict)
+    # Per-knockout-match aggregated stats across all simulation runs.
+    # {match_id: {"played": int, "home_slot_wins": int,
+    #             "home_goals_sum": float, "away_goals_sum": float,
+    #             "home_teams": {team_id: count}, "away_teams": {team_id: count}}}
+    ko_match_stats: dict = field(default_factory=dict)

@@ -1,0 +1,166 @@
+{
+  "_comment": "WC 2026 venue metadata. High-altitude venues significantly reduce goal scoring for teams from sea-level countries. Host-country teams receive a home advantage boost.",
+  "_altitude_note": "Altitude penalty applies when a sea-level team (home country altitude < 500m) plays above 1500m.",
+
+  "venues": {
+    "mexico_city": {
+      "name": "Estadio Azteca",
+      "city": "Mexico City",
+      "country": "Mexico",
+      "host_country_abbr": "MEX",
+      "altitude_m": 2240,
+      "high_altitude": true
+    },
+    "guadalajara": {
+      "name": "Estadio Akron",
+      "city": "Guadalajara",
+      "country": "Mexico",
+      "host_country_abbr": "MEX",
+      "altitude_m": 1560,
+      "high_altitude": true
+    },
+    "monterrey": {
+      "name": "Estadio BBVA",
+      "city": "Monterrey",
+      "country": "Mexico",
+      "host_country_abbr": "MEX",
+      "altitude_m": 538,
+      "high_altitude": false
+    },
+    "atlanta": {
+      "name": "Mercedes-Benz Stadium",
+      "city": "Atlanta",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 320,
+      "high_altitude": false
+    },
+    "boston": {
+      "name": "Gillette Stadium",
+      "city": "Boston",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 46,
+      "high_altitude": false
+    },
+    "dallas": {
+      "name": "AT&T Stadium",
+      "city": "Dallas",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 185,
+      "high_altitude": false
+    },
+    "houston": {
+      "name": "NRG Stadium",
+      "city": "Houston",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 15,
+      "high_altitude": false
+    },
+    "kansas_city": {
+      "name": "Arrowhead Stadium",
+      "city": "Kansas City",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 295,
+      "high_altitude": false
+    },
+    "los_angeles": {
+      "name": "SoFi Stadium",
+      "city": "Los Angeles",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 91,
+      "high_altitude": false
+    },
+    "miami": {
+      "name": "Hard Rock Stadium",
+      "city": "Miami",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 2,
+      "high_altitude": false
+    },
+    "new_york": {
+      "name": "MetLife Stadium",
+      "city": "East Rutherford, NJ",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 9,
+      "high_altitude": false
+    },
+    "philadelphia": {
+      "name": "Lincoln Financial Field",
+      "city": "Philadelphia",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 12,
+      "high_altitude": false
+    },
+    "san_francisco": {
+      "name": "Levi's Stadium",
+      "city": "Santa Clara, CA",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 22,
+      "high_altitude": false
+    },
+    "seattle": {
+      "name": "Lumen Field",
+      "city": "Seattle",
+      "country": "USA",
+      "host_country_abbr": "USA",
+      "altitude_m": 2,
+      "high_altitude": false
+    },
+    "toronto": {
+      "name": "BMO Field",
+      "city": "Toronto",
+      "country": "Canada",
+      "host_country_abbr": "CAN",
+      "altitude_m": 76,
+      "high_altitude": false
+    },
+    "vancouver": {
+      "name": "BC Place",
+      "city": "Vancouver",
+      "country": "Canada",
+      "host_country_abbr": "CAN",
+      "altitude_m": 10,
+      "high_altitude": false
+    }
+  },
+
+  "_match_venues_note": "Group-stage match → venue mapping. Match IDs correspond to ESPN fixture IDs where known. High-altitude matches tracked for Elo model penalty application.",
+  "high_altitude_matches": {
+    "_comment": "Match IDs (ESPN) that are played at high-altitude venues (Guadalajara or Mexico City). Altitude penalty is applied to sea-level teams in these matches.",
+    "by_venue": {
+      "mexico_city": [],
+      "guadalajara": []
+    }
+  },
+
+  "_knockout_venues_note": "R32 venue assignments from the official FIFA WC 2026 schedule. All other knockout matches (R16 onwards) are at sea-level USA/Canada venues.",
+  "knockout_match_venues": {
+    "M73": "mexico_city",
+    "M74": "atlanta",
+    "M75": "dallas",
+    "M76": "san_francisco",
+    "M77": "new_york",
+    "M78": "miami",
+    "M79": "mexico_city",
+    "M80": "toronto",
+    "M81": "houston",
+    "M82": "los_angeles",
+    "M83": "vancouver",
+    "M84": "kansas_city",
+    "M85": "boston",
+    "M86": "philadelphia",
+    "M87": "guadalajara",
+    "M88": "monterrey"
+  },
+
+  "host_nations": ["MEX", "USA", "CAN"]
+}

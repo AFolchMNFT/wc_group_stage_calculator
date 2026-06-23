@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Rich terminal output for the WC 2026 group stage simulator."""
 from rich.console import Console
 from rich.table import Table
@@ -135,7 +136,63 @@ def print_third_place_summary(result: SimResult, console: Console) -> None:
     console.print(t)
 
 
-def print_annexe_c_summary(result: SimResult, console: Console) -> None:
+def print_knockout_summary(result: SimResult, console: Console) -> None:
+    """Print advancement probabilities for all knockout rounds."""
+    n = result.n_simulations
+    has_ko = any(result.champion_counts.get(tid, 0) > 0 for tid in result.teams)
+    if not has_ko:
+        return
+
+    console.print(
+        Panel(
+            f"[bold cyan]Knockout Stage Probabilities[/bold cyan]  "
+            f"[dim]({n:,} simulations)[/dim]",
+            expand=False,
+        )
+    )
+
+    t = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold white")
+    t.add_column("Team", width=22)
+    t.add_column("R32%", justify="right", width=6)
+    t.add_column("R16%", justify="right", width=6)
+    t.add_column("QF%",  justify="right", width=6)
+    t.add_column("SF%",  justify="right", width=6)
+    t.add_column("Final%", justify="right", width=7)
+    t.add_column("Win%",  justify="right", width=6)
+
+    # Sort by winner probability descending
+    sorted_teams = sorted(
+        result.teams.keys(),
+        key=lambda tid: -result.champion_counts.get(tid, 0),
+    )
+
+    for tid in sorted_teams:
+        champ = result.champion_counts.get(tid, 0)
+        if champ == 0 and result.r32_counts.get(tid, 0) == 0:
+            continue
+        team = result.teams[tid]
+        r32_pct   = result.r32_counts.get(tid, 0) / n * 100
+        r16_pct   = result.r16_counts.get(tid, 0) / n * 100
+        qf_pct    = result.qf_counts.get(tid, 0) / n * 100
+        sf_pct    = result.sf_counts.get(tid, 0) / n * 100
+        final_pct = result.final_counts.get(tid, 0) / n * 100
+        win_pct   = champ / n * 100
+
+        style = "green" if win_pct >= 10 else ("yellow" if win_pct >= 3 else "")
+        t.add_row(
+            team.name,
+            f"{r32_pct:.1f}",
+            f"{r16_pct:.1f}",
+            f"{qf_pct:.1f}",
+            f"{sf_pct:.1f}",
+            f"{final_pct:.1f}",
+            f"[bold]{win_pct:.1f}[/bold]",
+            style=style,
+        )
+
+    console.print(t)
+
+
     """Print the Annexe C opponent distribution for each group winner that faces a 3rd-place team."""
     from simulator.r32_third_place import SLOT_MATCH
 

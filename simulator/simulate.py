@@ -1,10 +1,14 @@
-"""Monte Carlo simulation of the remaining WC 2026 group stage."""
+from __future__ import annotations
+"""Monte Carlo simulation of the full WC 2026 tournament (group stage → Final)."""
 import copy
 import random
 from collections import defaultdict
 
 import numpy as np
 
+from simulator.blend import blend_lambdas as _blend_lambdas
+from simulator.elo_model import compute_match_lambdas as _elo_lambdas
+from simulator.knockout import simulate_tournament as _simulate_tournament
 from simulator.match_model import DEFAULT_LAMBDA_TOTAL, solve_lambdas as _solve_lambdas
 from simulator.models import (
     GroupStanding,
@@ -19,6 +23,9 @@ from simulator.r32_third_place import allocation as _annexe_c_allocation
 # Groups whose winners face 3rd-place teams (Annexe C slots)
 _ANNEXE_C_WINNER_GROUPS = set(SLOT_MATCH.keys())
 
+# Valid model mode values
+_MODEL_MODES = frozenset({"odds", "elo", "blend"})
+
 
 def run(
     team_registry: dict,
@@ -29,12 +36,23 @@ def run(
     poisson_params: dict | None = None,
     seed: int | None = None,
     manual_results: dict | None = None,
+    model_mode: str = "blend",
+    elo_weight: float = 0.4,
+    elo_ratings: dict | None = None,
+    simulate_knockout: bool = True,
 ) -> SimResult:
-    """Run n_simulations of the remaining group stage and return aggregated SimResult.
+    """Run n_simulations of the full tournament and return aggregated SimResult.
 
     Goal scoring is modelled as independent Poisson processes with per-fixture
-    (λ_home, λ_away) derived from the betting markets.  When market data is absent,
-    solve_lambdas() distributes a default λ_total using the H2H win probability.
+    (λ_home, λ_away) derived from the betting markets, the Elo model, or a blend
+    of both depending on model_mode.
+
+    model_mode:        'odds'  — use betting odds only (original behaviour)
+                       'elo'   — use Elo/factor model only
+                       'blend' — weighted geometric mean of both (default)
+    elo_weight:        Elo model weight in blend mode (0=pure odds, 1=pure Elo).
+    elo_ratings:       {team_id: elo} pre-fetched ratings; None skips Elo model.
+    simulate_knockout: If True (default), simulate R32→Final after group stage.
 
     manual_results: optional dict of match_id -> (home_goals, away_goals) for fixtures
     whose score is already known.  Applied deterministically; remaining fixtures are
@@ -78,23 +96,55 @@ def run(
     if n_fix == 0:
         rng_state = random.Random(seed)
         one_run = _rank_all_groups(groups, copy.deepcopy(initial_state), rng_state)
-        result = _aggregate([one_run] * n_simulations, team_registry, groups)
+        ko_elo = elo_ratings or {}
+        knockout_runs: list[dict] = []
+        if simulate_knockout and ko_elo:
+            for _ in range(n_simulations):
+                knockout_runs.append(
+                    _simulate_tournament(
+                        group_ranks=one_run["group_ranks"],
+                        best_8_groups=one_run["best_8_groups"],
+                        annexe_c=one_run["annexe_c"],
+                        elo_ratings=ko_elo,
+                        team_registry=team_registry,
+                        rng=rng_state,
+                    )
+                )
+        result = _aggregate([one_run] * n_simulations, team_registry, groups, knockout_runs)
         result.fixture_avg_goals = avg_goals
         return result
 
     # ---- Resolve per-fixture Poisson goal rates --------------------------------
-    # If the fixture has λ values from the odds API, use them directly.
-    # Otherwise derive them from the H2H win probability + a default total.
+    # Blend odds-based and Elo-based λ values according to model_mode.
+    _use_elo = model_mode in ("elo", "blend") and elo_ratings is not None
+    _use_odds = model_mode in ("odds", "blend")
+
     lambda_homes = np.empty(n_fix)
     lambda_aways = np.empty(n_fix)
     for j, fix in enumerate(remaining):
-        if fix.lambda_home is not None and fix.lambda_away is not None:
-            lambda_homes[j] = fix.lambda_home
-            lambda_aways[j] = fix.lambda_away
+        # Odds-based λ
+        if _use_odds and fix.lambda_home is not None and fix.lambda_away is not None:
+            lh_odds, la_odds = fix.lambda_home, fix.lambda_away
+        elif _use_odds:
+            lh_odds, la_odds = _solve_lambdas(fix.prob_home, default_lt)
         else:
-            lh, la = _solve_lambdas(fix.prob_home, default_lt)
-            lambda_homes[j] = lh
-            lambda_aways[j] = la
+            lh_odds, la_odds = None, None
+
+        # Elo-based λ
+        if _use_elo:
+            lh_elo, la_elo = _elo_lambdas(
+                home_team_id=fix.home_team_id,
+                away_team_id=fix.away_team_id,
+                elo_ratings=elo_ratings,
+                team_registry=team_registry,
+            )
+        else:
+            # Fall back to solve_lambdas when Elo not available
+            lh_elo, la_elo = _solve_lambdas(fix.prob_home, default_lt)
+
+        lh, la = _blend_lambdas(lh_odds, la_odds, lh_elo, la_elo, elo_weight)
+        lambda_homes[j] = lh
+        lambda_aways[j] = la
 
     # ---- Pre-generate all goals: shape (n_simulations, n_fix) -----------------
     # Each fixture column j is drawn from Pois(λ_home[j]) / Pois(λ_away[j]).
@@ -114,7 +164,11 @@ def run(
 
     # ---- Main simulation loop -------------------------------------------------
     all_runs = []
+    knockout_runs: list[dict] = []  # per-simulation knockout results
     rng = random.Random(seed)
+
+    # Use fallback elo_ratings for knockout even if Elo was not used in group stage
+    ko_elo = elo_ratings or {}
 
     for i in range(n_simulations):
         state = copy.deepcopy(initial_state)
@@ -126,9 +180,21 @@ def run(
                 int(home_goals_all[i, j]),
                 int(away_goals_all[i, j]),
             )
-        all_runs.append(_rank_all_groups(groups, state, rng))
+        run_result = _rank_all_groups(groups, state, rng)
+        all_runs.append(run_result)
 
-    result = _aggregate(all_runs, team_registry, groups)
+        if simulate_knockout and ko_elo:
+            ko_result = _simulate_tournament(
+                group_ranks=run_result["group_ranks"],
+                best_8_groups=run_result["best_8_groups"],
+                annexe_c=run_result["annexe_c"],
+                elo_ratings=ko_elo,
+                team_registry=team_registry,
+                rng=rng,
+            )
+            knockout_runs.append(ko_result)
+
+    result = _aggregate(all_runs, team_registry, groups, knockout_runs)
     result.fixture_avg_goals = avg_goals
     return result
 
@@ -310,7 +376,12 @@ def _select_best_8_thirds(thirds: list[dict], rng: random.Random) -> frozenset:
     return frozenset(t["group"] for t in sorted_thirds[:8])
 
 
-def _aggregate(all_runs: list, team_registry: dict, groups: dict) -> SimResult:
+def _aggregate(
+    all_runs: list,
+    team_registry: dict,
+    groups: dict,
+    knockout_runs: list | None = None,
+) -> SimResult:
     n = len(all_runs)
 
     group_finish_counts: dict[str, dict[int, int]] = {
@@ -344,6 +415,63 @@ def _aggregate(all_runs: list, team_registry: dict, groups: dict) -> SimResult:
         for slot, opp_group in annexe_c.items():
             annexe_c_opponent_counts[slot][opp_group] += 1
 
+    # ---- Aggregate knockout round advancement counts -------------------------
+    _ko_round_fields = {
+        "round_of_32":   "r32_ko",   # distinct from group-stage r32_counts
+        "round_of_16":   "r16",
+        "quarter_finals": "qf",
+        "semi_finals":   "sf",
+        "final":         "final",
+    }
+    r16_counts: dict[str, int] = {tid: 0 for tid in team_registry}
+    qf_counts:  dict[str, int] = {tid: 0 for tid in team_registry}
+    sf_counts:  dict[str, int] = {tid: 0 for tid in team_registry}
+    final_counts: dict[str, int] = {tid: 0 for tid in team_registry}
+    champion_counts: dict[str, int] = {tid: 0 for tid in team_registry}
+    ko_match_stats: dict = {}
+
+    if knockout_runs:
+        for ko_run in knockout_runs:
+            # Participants in each round = set of winners from the previous round
+            # plus both participants of each match. We track who PLAYED in the round.
+            for rnd, match_data in ko_run.items():
+                for mid, mdata in match_data.items():
+                    winner_tid = mdata["winner"]
+                    home_id = mdata["home"]
+                    away_id = mdata["away"]
+                    home_g = mdata["home_g"]
+                    away_g = mdata["away_g"]
+
+                    if winner_tid not in team_registry:
+                        continue
+                    if rnd == "round_of_16":
+                        r16_counts[winner_tid] = r16_counts.get(winner_tid, 0) + 1
+                    elif rnd == "quarter_finals":
+                        qf_counts[winner_tid] = qf_counts.get(winner_tid, 0) + 1
+                    elif rnd == "semi_finals":
+                        sf_counts[winner_tid] = sf_counts.get(winner_tid, 0) + 1
+                    elif rnd == "final":
+                        final_counts[winner_tid] = final_counts.get(winner_tid, 0) + 1
+                        champion_counts[winner_tid] = champion_counts.get(winner_tid, 0) + 1
+
+                    # Accumulate per-match stats for MC results display
+                    ms = ko_match_stats.setdefault(mid, {
+                        "played": 0,
+                        "home_slot_wins": 0,
+                        "home_goals_sum": 0.0,
+                        "away_goals_sum": 0.0,
+                        "home_teams": defaultdict(int),
+                        "away_teams": defaultdict(int),
+                        "round": rnd,
+                    })
+                    ms["played"] += 1
+                    ms["home_goals_sum"] += home_g
+                    ms["away_goals_sum"] += away_g
+                    if winner_tid == home_id:
+                        ms["home_slot_wins"] += 1
+                    ms["home_teams"][home_id] += 1
+                    ms["away_teams"][away_id] += 1
+
     return SimResult(
         n_simulations=n,
         teams=team_registry,
@@ -352,4 +480,10 @@ def _aggregate(all_runs: list, team_registry: dict, groups: dict) -> SimResult:
         r32_counts=r32_counts,
         third_qualified_counts=third_qualified_counts,
         annexe_c_opponent_counts=dict(annexe_c_opponent_counts),
+        r16_counts=r16_counts,
+        qf_counts=qf_counts,
+        sf_counts=sf_counts,
+        final_counts=final_counts,
+        champion_counts=champion_counts,
+        ko_match_stats=ko_match_stats,
     )

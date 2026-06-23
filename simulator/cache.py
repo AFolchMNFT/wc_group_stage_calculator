@@ -1,10 +1,10 @@
+from __future__ import annotations
 """Persist fetched ESPN + odds data to/from a local JSON cache.
 
 The cache stores the full state of team_registry, group_standings, completed matches,
 and remaining fixtures (including any derived λ values from the odds API).
 This allows the app to run completely offline after one successful fetch.
 """
-from __future__ import annotations
 
 import dataclasses
 import json
@@ -20,6 +20,7 @@ def save(
     completed: list,
     fixtures: list,
     path: Path,
+    elo_ratings: dict | None = None,
 ) -> None:
     """Serialise all data to a JSON cache file."""
     data = {
@@ -32,13 +33,15 @@ def save(
         "completed": [dataclasses.asdict(m) for m in completed],
         "fixtures": [dataclasses.asdict(f) for f in fixtures],
     }
+    if elo_ratings:
+        data["elo_ratings"] = elo_ratings
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as fp:
         json.dump(data, fp, indent=2)
 
 
-def load(path: Path) -> tuple[dict, dict, list, list, str]:
-    """Load cached data and return (team_registry, group_standings, completed, fixtures, cached_at)."""
+def load(path: Path) -> tuple[dict, dict, list, list, str, dict]:
+    """Load cached data and return (team_registry, group_standings, completed, fixtures, cached_at, elo_ratings)."""
     with open(path) as fp:
         data = json.load(fp)
 
@@ -51,8 +54,9 @@ def load(path: Path) -> tuple[dict, dict, list, list, str]:
 
     completed = [MatchResult(**m) for m in data["completed"]]
     fixtures = [MatchFixture(**f) for f in data["fixtures"]]
+    elo_ratings = data.get("elo_ratings", {})
 
-    return team_registry, group_standings, completed, fixtures, data.get("cached_at", "")
+    return team_registry, group_standings, completed, fixtures, data.get("cached_at", ""), elo_ratings
 
 
 def timestamp(path: Path) -> str:

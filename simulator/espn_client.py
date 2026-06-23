@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Fetch current WC 2026 standings and fixtures from the ESPN public API."""
 import concurrent.futures
 import datetime

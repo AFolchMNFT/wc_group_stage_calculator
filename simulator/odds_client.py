@@ -16,11 +16,13 @@ _TIMEOUT = 15
 NAME_ALIASES: dict[str, str] = {
     "USA": "United States",
     "Turkey": "Türkiye",
-    "South Korea": "Korea Republic",
+    "Czech Republic": "Czechia",
+    "Bosnia & Herzegovina": "Bosnia-Herzegovina",
+    "Bosnia and Herzegovina": "Bosnia-Herzegovina",
+    "DR Congo": "Congo DR",
+    "Democratic Republic of Congo": "Congo DR",
     "Republic of Ireland": "Republic of Ireland",
     "Ivory Coast": "Ivory Coast",
-    "Bosnia and Herzegovina": "Bosnia-Herzegovina",
-    "Democratic Republic of Congo": "DR Congo",
     "Trinidad & Tobago": "Trinidad and Tobago",
 }
 
