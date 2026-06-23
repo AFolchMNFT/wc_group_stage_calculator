@@ -1440,7 +1440,7 @@ with st.expander("📋  Share Summary — copy-paste text for any tab"):
     from simulator.r32_third_place import SLOT_MATCH as _SM_SHARE
 
     _share_tabs = st.tabs(
-        ["🇲🇽 Mexico", "📊 Groups", "🏅 3rd Place", "📋 Annexe C", "🏆 Bracket"]
+        ["🇲🇽 Mexico", "📊 Groups", "🏅 3rd Place", "📋 Annexe C", "🏆 Bracket", "⚽ Knockout"]
     )
 
     # ── Mexico summary ───────────────────────────────────────────────────
@@ -1574,3 +1574,77 @@ with st.expander("📋  Share Summary — copy-paste text for any tab"):
         _lines.append(f"\nPredicted winner: {_fw_s}")
 
         st.text_area("Bracket", "\n".join(_lines), height=360, label_visibility="collapsed")
+
+    # ── Knockout simulation summary ──────────────────────────────────────
+    with _share_tabs[5]:
+        _ko_ms = result.ko_match_stats
+        _lines = [f"Knockout Simulation Results ({n:,} sims)\n"]
+        _lines.append(
+            "Format per match: [Simulated score] | MC avg: H.h – A.a  · home-slot wins X%"
+        )
+        _lines.append("Most likely team shown; appearance % in parentheses.\n")
+
+        _RND_ORDER_SHARE = [
+            ("round_of_32",    "Round of 32",    _R32_ORD_S),
+            ("round_of_16",    "Round of 16",    [m for m, _, _ in _R16_S]),
+            ("quarter_finals", "Quarter-Finals", [m for m, _, _ in _QF_S]),
+            ("semi_finals",    "Semi-Finals",    [m for m, _, _ in _SF_S]),
+            ("final",          "Final",          [_fin_id_s]),
+        ]
+
+        for _rk_s, _rl_s, _mids_s in _RND_ORDER_SHARE:
+            _lines.append(f"--- {_rl_s} ---")
+            for _mid_s in _mids_s:
+                # Showcase (single-run) score
+                _sc = _showcase.get(_mid_s, {})
+                if _sc:
+                    _sh_t = result.teams.get(_sc["home"])
+                    _sa_t = result.teams.get(_sc["away"])
+                    _sh_n = _sh_t.name if _sh_t else _sc["home"]
+                    _sa_n = _sa_t.name if _sa_t else _sc["away"]
+                    _sw_t = result.teams.get(_sc["winner"])
+                    _sw_n = _sw_t.name if _sw_t else _sc["winner"]
+                    _score_str = f"{_sh_n} {_sc['home_g']} – {_sc['away_g']} {_sa_n}  (winner: {_sw_n})"
+                else:
+                    _score_str = "(no showcase data)"
+
+                # MC aggregate stats
+                _ms = _ko_ms.get(_mid_s, {})
+                if _ms and _ms["played"] > 0:
+                    _pl = _ms["played"]
+                    _avg_h = _ms["home_goals_sum"] / _pl
+                    _avg_a = _ms["away_goals_sum"] / _pl
+                    _hwp = _ms["home_slot_wins"] / _pl * 100
+                    _awp = 100 - _hwp
+                    _hm_id = max(_ms["home_teams"], key=_ms["home_teams"].get) if _ms["home_teams"] else ""
+                    _am_id = max(_ms["away_teams"], key=_ms["away_teams"].get) if _ms["away_teams"] else ""
+                    _hm_t = result.teams.get(_hm_id)
+                    _am_t = result.teams.get(_am_id)
+                    _hm_n = _hm_t.name if _hm_t else _hm_id
+                    _am_n = _am_t.name if _am_t else _am_id
+                    _hm_pct = _ms["home_teams"].get(_hm_id, 0) / _pl * 100
+                    _am_pct = _ms["away_teams"].get(_am_id, 0) / _pl * 100
+                    _mc_str = (
+                        f"MC: {_hm_n} ({_hm_pct:.0f}%) {_avg_h:.2f} – {_avg_a:.2f} "
+                        f"{_am_n} ({_am_pct:.0f}%)  ·  home wins {_hwp:.0f}% / away {_awp:.0f}%"
+                    )
+                else:
+                    _mc_str = "MC: no data"
+
+                _lines.append(f"  {_mid_s}  {_score_str}")
+                _lines.append(f"       {_mc_str}")
+            _lines.append("")
+
+        # Championship probabilities (top 15)
+        _lines.append("--- Championship Probabilities (top 15) ---")
+        _champ_rows = sorted(
+            [(result.teams[t].name if result.teams.get(t) else t, c)
+             for t, c in result.champion_counts.items() if c > 0],
+            key=lambda x: -x[1],
+        )[:15]
+        for _rank_s, (_cn_s, _cc_s) in enumerate(_champ_rows, 1):
+            _lines.append(f"  {_rank_s:2d}. {_cn_s:<22s} {_cc_s/n*100:5.1f}%")
+
+        st.text_area(
+            "Knockout", "\n".join(_lines), height=420, label_visibility="collapsed"
+        )
