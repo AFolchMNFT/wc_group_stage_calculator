@@ -87,3 +87,10 @@ class SimResult:
     #             "home_goals_sum": float, "away_goals_sum": float,
     #             "home_teams": {team_id: count}, "away_teams": {team_id: count}}}
     ko_match_stats: dict = field(default_factory=dict)
+    # Per-team round-by-round breakdown of opponents beaten.
+    # {team_id: {round_key: {opponent_id: count}}}
+    ko_team_paths: dict = field(default_factory=dict)
+    # For each champion team: frequency of each complete path (tuple of opponents
+    # beaten from R32 through Final).
+    # {team_id: {(opp_r32, opp_r16, opp_qf, opp_sf, opp_final): count}}
+    ko_champion_paths: dict = field(default_factory=dict)

@@ -429,6 +429,8 @@ def _aggregate(
     final_counts: dict[str, int] = {tid: 0 for tid in team_registry}
     champion_counts: dict[str, int] = {tid: 0 for tid in team_registry}
     ko_match_stats: dict = {}
+    ko_team_paths: dict = {}    # {team_id: {round: {opponent_id: count}}}
+    ko_champion_paths: dict = {}  # {team_id: {path_tuple: count}}
 
     if knockout_runs:
         for ko_run in knockout_runs:
@@ -472,6 +474,28 @@ def _aggregate(
                     ms["home_teams"][home_id] += 1
                     ms["away_teams"][away_id] += 1
 
+                    # Per-team opponent tracking (who did this team beat)
+                    loser_id = away_id if winner_tid == home_id else home_id
+                    tp = ko_team_paths.setdefault(winner_tid, {})
+                    rd_dict = tp.setdefault(rnd, defaultdict(int))
+                    rd_dict[loser_id] += 1
+
+            # Champion path for this run: sequence of opponents the champion beat
+            final_rnd_data = ko_run.get("final", {})
+            if final_rnd_data:
+                final_mid_key = next(iter(final_rnd_data))
+                champ_id = final_rnd_data[final_mid_key]["winner"]
+                path_opps = []
+                for _rnd_name in ("round_of_32", "round_of_16", "quarter_finals", "semi_finals", "final"):
+                    for _mid2, _md2 in ko_run.get(_rnd_name, {}).items():
+                        if _md2["winner"] == champ_id:
+                            _loser2 = _md2["away"] if _md2["home"] == champ_id else _md2["home"]
+                            path_opps.append(_loser2)
+                            break
+                if path_opps:
+                    cp = ko_champion_paths.setdefault(champ_id, defaultdict(int))
+                    cp[tuple(path_opps)] += 1
+
     return SimResult(
         n_simulations=n,
         teams=team_registry,
@@ -486,4 +510,6 @@ def _aggregate(
         final_counts=final_counts,
         champion_counts=champion_counts,
         ko_match_stats=ko_match_stats,
+        ko_team_paths=ko_team_paths,
+        ko_champion_paths=ko_champion_paths,
     )

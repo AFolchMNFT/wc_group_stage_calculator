@@ -627,49 +627,36 @@ mexico_id: str | None = next(
 )
 
 
-def _compute_showcase_bracket(result, group_lineups: dict, elo_ratings: dict) -> dict:
-    """Run one deterministic showcase knockout simulation using modal group finishers.
+def _compute_mc_bracket(result) -> dict:
+    """Build bracket display data from Monte Carlo ko_match_stats.
 
-    Uses a fixed random seed so the display is stable across Streamlit re-renders.
-    Returns {match_id: {"home": team_id, "away": team_id, "home_g": int,
-                        "away_g": int, "winner": team_id, "round": str}}
+    For each knockout match uses the modal (most frequent) teams from the full
+    simulation ensemble and the MC-average expected goals.
+    Returns {match_id: {"home": team_id, "away": team_id,
+                        "home_g": float, "away_g": float,
+                        "winner": team_id, "home_win_pct": float, "round": str}}
     """
-    import random as _rnd
-    from simulator.knockout import simulate_bracket_once as _sim_once
-    from simulator.r32_third_place import allocation as _r32_alloc
-
-    if not elo_ratings:
+    ko_stats = result.ko_match_stats
+    if not ko_stats:
         return {}
-
-    # Modal group ranks: most-likely finisher at each position per group
-    group_ranks_modal: dict[str, list[str]] = {}
-    for grp, positions in group_lineups.items():
-        group_ranks_modal[grp] = [positions.get(pos, "") for pos in sorted(positions.keys())]
-
-    # Best 8 = groups with highest 3rd-place qualification probability
-    thirds_sorted = sorted(
-        result.groups.keys(),
-        key=lambda g: -result.third_qualified_counts.get(g, 0),
-    )
-    best_8_modal = frozenset(thirds_sorted[:8])
-
-    try:
-        annexe_c_modal = _r32_alloc(best_8_modal)
-    except Exception:
-        annexe_c_modal = {}
-
-    rng = _rnd.Random(42)
-    try:
-        return _sim_once(
-            group_ranks=group_ranks_modal,
-            best_8_groups=best_8_modal,
-            annexe_c=annexe_c_modal,
-            elo_ratings=elo_ratings,
-            team_registry=result.teams,
-            rng=rng,
-        )
-    except Exception:
-        return {}
+    mc: dict[str, dict] = {}
+    for mid, ms in ko_stats.items():
+        pl = ms.get("played", 0)
+        if pl == 0 or not ms.get("home_teams") or not ms.get("away_teams"):
+            continue
+        h_id = max(ms["home_teams"], key=ms["home_teams"].get)
+        a_id = max(ms["away_teams"], key=ms["away_teams"].get)
+        hwp = ms["home_slot_wins"] / pl * 100
+        mc[mid] = {
+            "home": h_id,
+            "away": a_id,
+            "home_g": ms["home_goals_sum"] / pl,
+            "away_g": ms["away_goals_sum"] / pl,
+            "winner": h_id if hwp >= 50 else a_id,
+            "home_win_pct": hwp,
+            "round": ms.get("round", ""),
+        }
+    return mc
 
 
 tab_mex, tab_groups, tab_third, tab_annexe, tab_bracket, tab_knockout, tab_scores, tab_how = st.tabs(
@@ -903,8 +890,8 @@ with tab_bracket:
     st.header(f"Simulated Tournament Bracket  ({n:,} simulations)")
     st.caption(
         "R32 slots: most likely team from group-stage simulation. "
-        "R16 → Final: one representative Elo-model simulation (fixed seed 42). "
-        "Each match shows the simulated score; winner in green. Mexico 🇲🇽 highlighted."
+        "R16 → Final: Monte Carlo expected outcomes across all simulations. "
+        "Each match shows win probability and expected goals; most likely winner in green. Mexico 🇲🇽 highlighted."
     )
 
     # ── Bracket topology ─────────────────────────────────────────────────
@@ -946,21 +933,15 @@ with tab_bracket:
                     "slot": f"3rd Grp {_bg}", "pct": _oc[_bg] / _ot * 100}
         return {"name": "?", "slot": "3rd", "pct": 0.0}
 
-    # ── Showcase simulation (one deterministic run, fixed seed) ──────────
-    # Computed BEFORE _bkt_rows so R32 display is driven by the same team
-    # assignments the simulation actually uses — keeping the bracket consistent.
-    _showcase = _compute_showcase_bracket(
-        result, _group_lineups, st.session_state.get("elo_ratings") or {}
-    )
+    # ── MC bracket: modal teams + expected scores from all simulations ──────
+    _mc_bracket = _compute_mc_bracket(result)
 
     def _r32_row_info(mid, slot_num):
-        """Return R32 row data using the showcase's actual team assignment.
+        """Return R32 row data using the MC bracket's modal team assignment.
 
-        This guarantees the team shown in the R32 column is exactly the team
-        that participates in the simulated R16/QF/SF/Final matches.  Falls back
-        to _slot_info (aggregate stats) when no showcase data is available.
+        Falls back to _slot_info (aggregate group-stage stats) when no MC data.
         """
-        _s_data = _showcase.get(mid, {})
+        _s_data = _mc_bracket.get(mid, {})
         _side = "home" if slot_num == 1 else "away"
         _tid = _s_data.get(_side) if _s_data else None
         if not _tid:
@@ -975,23 +956,25 @@ with tab_bracket:
         _lbl = f"3rd Grp {_t.group}" if _pos == 3 else f"{_pos}{_t.group}"
         return {"name": _t.name, "slot": _lbl, "pct": _pct}
 
-    # ── 32 R32 team rows (from showcase for full bracket consistency) ─────
+    # ── 32 R32 team rows (from MC bracket for full consistency) ─────────
     _bkt_rows = []
     for _mid in _R32_ORDER:
         _bkt_rows.append({**_r32_row_info(_mid, 1), "match": _mid})
         _bkt_rows.append({**_r32_row_info(_mid, 2), "match": _mid})
 
     def _ko_cell(mid, rowspan):
-        """Build an HTML <td> showing the simulated match score for a knockout match."""
-        data = _showcase.get(mid, {})
+        """Build an HTML <td> showing MC win probability and expected score."""
+        data = _mc_bracket.get(mid, {})
         if data:
-            _h_id = data["home"]
-            _a_id = data["away"]
-            _hg = data["home_g"]
-            _ag = data["away_g"]
+            _h_id   = data["home"]
+            _a_id   = data["away"]
+            _hg     = data["home_g"]
+            _ag     = data["away_g"]
             _win_id = data["winner"]
-            _h_t = result.teams.get(_h_id)
-            _a_t = result.teams.get(_a_id)
+            _hwp    = data["home_win_pct"]
+            _awp    = 100 - _hwp
+            _h_t  = result.teams.get(_h_id)
+            _a_t  = result.teams.get(_a_id)
             _h_name = _h_t.name if _h_t else _h_id
             _a_name = _a_t.name if _a_t else _a_id
             _is_m = _bkt_mex(_h_name) or _bkt_mex(_a_name)
@@ -999,9 +982,9 @@ with tab_bracket:
             _a_s = "font-weight:bold;color:#1b5e20" if _win_id == _a_id else "color:#999"
             _content = (
                 f'<div style="color:#aaa;font-size:0.70em;margin-bottom:2px">{mid}</div>'
-                f'<div style="{_h_s}">{_bkt_esc(_h_name)}&nbsp;<b>{_hg}</b></div>'
-                f'<div style="color:#ccc;font-size:0.72em;margin:1px 0">&#8211;</div>'
-                f'<div style="{_a_s}"><b>{_ag}</b>&nbsp;{_bkt_esc(_a_name)}</div>'
+                f'<div style="{_h_s}">{_bkt_esc(_h_name)}&nbsp;<b>{_hwp:.0f}%</b></div>'
+                f'<div style="color:#ccc;font-size:0.72em;margin:1px 0">{_hg:.1f}&nbsp;&#8211;&nbsp;{_ag:.1f}</div>'
+                f'<div style="{_a_s}"><b>{_awp:.0f}%</b>&nbsp;{_bkt_esc(_a_name)}</div>'
             )
         else:
             _is_m = False
@@ -1048,14 +1031,16 @@ with tab_bracket:
             _row += _ko_cell(_sfm, 16)
 
         if _ri == 0:
-            _fin_data = _showcase.get(_final_id, {})
+            _fin_data = _mc_bracket.get(_final_id, {})
             if _fin_data:
-                _fh_t = result.teams.get(_fin_data["home"])
-                _fa_t = result.teams.get(_fin_data["away"])
-                _fw_t = result.teams.get(_fin_data["winner"])
+                _fh_t  = result.teams.get(_fin_data["home"])
+                _fa_t  = result.teams.get(_fin_data["away"])
+                _fw_t  = result.teams.get(_fin_data["winner"])
                 _fh_name = _fh_t.name if _fh_t else "?"
                 _fa_name = _fa_t.name if _fa_t else "?"
                 _fw_name = _fw_t.name if _fw_t else "?"
+                _fhwp = _fin_data["home_win_pct"]
+                _fawp = 100 - _fhwp
                 _fhg, _fag = _fin_data["home_g"], _fin_data["away_g"]
                 _fh_s = "font-weight:bold;color:#1b5e20" if _fin_data["winner"] == _fin_data["home"] else "color:#999"
                 _fa_s = "font-weight:bold;color:#1b5e20" if _fin_data["winner"] == _fin_data["away"] else "color:#999"
@@ -1064,11 +1049,11 @@ with tab_bracket:
                     f'padding:10px;font-size:0.8em;min-width:115px;'
                     f'background:#fffde7;border:2px solid #ffd700;border-radius:6px;">'
                     f'<div style="color:#aaa;font-size:0.72em;margin-bottom:4px">{_final_id} · Final</div>'
-                    f'<div style="{_fh_s}">{_bkt_esc(_fh_name)}&nbsp;<b>{_fhg}</b></div>'
-                    f'<div style="color:#bbb;margin:3px 0;font-size:0.76em">&#8211;</div>'
-                    f'<div style="{_fa_s}"><b>{_fag}</b>&nbsp;{_bkt_esc(_fa_name)}</div>'
+                    f'<div style="{_fh_s}">{_bkt_esc(_fh_name)}&nbsp;<b>{_fhwp:.0f}%</b></div>'
+                    f'<div style="color:#bbb;margin:3px 0;font-size:0.76em">{_fhg:.1f} – {_fag:.1f} exp.</div>'
+                    f'<div style="{_fa_s}"><b>{_fawp:.0f}%</b>&nbsp;{_bkt_esc(_fa_name)}</div>'
                     f'<div style="margin-top:10px;padding-top:6px;border-top:1px solid #e8d000">'
-                    f'<div style="color:#888;font-size:0.72em">Simulated winner</div>'
+                    f'<div style="color:#888;font-size:0.72em">Most likely winner</div>'
                     f'<div style="font-weight:bold;font-size:0.95em;color:#1b5e20">🏆 {_bkt_esc(_fw_name)}</div>'
                     f'</div></td>'
                 )
@@ -1207,6 +1192,102 @@ with tab_knockout:
             use_container_width=True,
             height=min(800, 35 * len(df_ko) + 38),
         )
+
+        st.divider()
+        st.subheader("Championship Paths")
+        st.caption(
+            "Select a team to see how they can win the tournament — "
+            "who they beat at each round and the most common complete paths to the title."
+        )
+
+        _all_champs_ko = sorted(
+            [
+                (result.teams[t].name if result.teams.get(t) else t, t, c)
+                for t, c in result.champion_counts.items() if c > 0
+            ],
+            key=lambda x: -x[2],
+        )
+        if not _all_champs_ko:
+            st.info("No championship data yet — run the simulation first.")
+        else:
+            _sel_name_ko = st.selectbox(
+                "Team",
+                [nm for nm, _, _ in _all_champs_ko],
+                key="champ_path_team",
+                label_visibility="collapsed",
+            )
+            _sel_tid_ko = next((t for nm, t, _ in _all_champs_ko if nm == _sel_name_ko), None)
+            if _sel_tid_ko:
+                _champ_cnt_ko = result.champion_counts.get(_sel_tid_ko, 0)
+                _r32_played = result.r32_counts.get(_sel_tid_ko, 0)
+
+                _col1_ko, _col2_ko, _col3_ko, _col4_ko, _col5_ko, _col6_ko = st.columns(6)
+                _col1_ko.metric("R32", f"{_r32_played / n * 100:.1f}%")
+                _col2_ko.metric("R16", f"{sum(result.ko_team_paths.get(_sel_tid_ko, {}).get('round_of_32', {}).values()) / n * 100:.1f}%")
+                _col3_ko.metric("QF",  f"{result.r16_counts.get(_sel_tid_ko, 0) / n * 100:.1f}%")
+                _col4_ko.metric("SF",  f"{result.qf_counts.get(_sel_tid_ko, 0) / n * 100:.1f}%")
+                _col5_ko.metric("Final", f"{result.sf_counts.get(_sel_tid_ko, 0) / n * 100:.1f}%")
+                _col6_ko.metric("🏆 Win", f"{_champ_cnt_ko / n * 100:.1f}%")
+
+                st.markdown("**Most common opponents beaten per round**")
+                _tp_ko = result.ko_team_paths.get(_sel_tid_ko, {})
+                _rnd_denominators = {
+                    "round_of_32":   _r32_played,
+                    "round_of_16":   sum(_tp_ko.get("round_of_32", {}).values()) or 1,
+                    "quarter_finals": result.r16_counts.get(_sel_tid_ko, 0) or 1,
+                    "semi_finals":   result.qf_counts.get(_sel_tid_ko, 0) or 1,
+                    "final":         result.sf_counts.get(_sel_tid_ko, 0) or 1,
+                }
+                _rnd_labels_ko = {
+                    "round_of_32": "R32", "round_of_16": "R16",
+                    "quarter_finals": "QF", "semi_finals": "SF", "final": "Final",
+                }
+                _path_rows = []
+                for _rk_ko, _rl_ko in _rnd_labels_ko.items():
+                    _opps_ko = _tp_ko.get(_rk_ko, {})
+                    _denom_ko = _rnd_denominators[_rk_ko]
+                    if not _opps_ko:
+                        continue
+                    _top_opps_ko = sorted(_opps_ko.items(), key=lambda x: -x[1])[:5]
+                    for _oid_ko, _ocnt_ko in _top_opps_ko:
+                        _oname_ko = (result.teams[_oid_ko].name
+                                     if result.teams.get(_oid_ko) else _oid_ko)
+                        _path_rows.append({
+                            "Round": _rl_ko,
+                            "Opponent": _oname_ko,
+                            "Times beaten": _ocnt_ko,
+                            "Win % (when playing)": round(_ocnt_ko / _denom_ko * 100, 1),
+                        })
+                if _path_rows:
+                    st.dataframe(
+                        pd.DataFrame(_path_rows),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                # Top complete championship paths
+                _cp_ko = result.ko_champion_paths.get(_sel_tid_ko, {})
+                if _cp_ko and _champ_cnt_ko > 0:
+                    st.markdown("**Top championship paths to the title**")
+                    st.caption(f"Each path is a sequence of opponents beaten from R32 → Final "
+                               f"across {_champ_cnt_ko:,} simulations where {_sel_name_ko} won.")
+                    _top_paths_ko = sorted(_cp_ko.items(), key=lambda x: -x[1])[:10]
+                    _path_display = []
+                    for _pk_ko, _pc_ko in _top_paths_ko:
+                        _names_ko = [
+                            (result.teams[o].name if result.teams.get(o) else o)
+                            for o in _pk_ko
+                        ]
+                        _path_display.append({
+                            "Path (R32 → Final)": " → ".join(_names_ko),
+                            "Sims": _pc_ko,
+                            "% of titles": round(_pc_ko / _champ_cnt_ko * 100, 1),
+                        })
+                    st.dataframe(
+                        pd.DataFrame(_path_display),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
 # ---- Avg Scores tab ----
 with tab_scores:
