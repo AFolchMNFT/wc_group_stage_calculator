@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WC 2026 Group Stage Simulator — Backend Output</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #121b2e;
+    --panel-2: #18233b;
+    --border: #233252;
+    --text: #e7ecf7;
+    --muted: #93a2c2;
+    --accent: #4ad6a8;
+    --accent-2: #f2b84b;
+    --gold: #f2b84b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: radial-gradient(circle at top, #142036 0%, var(--bg) 60%);
+    color: var(--text);
+    padding: 32px 24px 64px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { margin-bottom: 28px; }
+  header h1 { font-size: 26px; margin: 0 0 6px; }
+  header .sub { color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .badges { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .badge {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .badge b { color: var(--text); }
+  section { margin-bottom: 36px; }
+  section h2 {
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }
+  .groups-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 14px;
+  }
+  .group-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .group-card h3 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: var(--accent-2);
+    letter-spacing: 0.05em;
+  }
+  .team-row { margin-bottom: 9px; }
+  .team-row:last-child { margin-bottom: 0; }
+  .team-row .meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    margin-bottom: 3px;
+  }
+  .team-row .meta .name { color: var(--text); font-weight: 500; }
+  .team-row .meta .pct { color: var(--muted); }
+  .bar-track {
+    height: 6px;
+    border-radius: 4px;
+    background: #0d1626;
+    overflow: hidden;
+    display: flex;
+  }
+  .bar-seg { height: 100%; }
+  .seg-1 { background: var(--accent); }
+  .seg-2 { background: #5b9bf2; }
+  .seg-3 { background: #9a7cf0; }
+  .seg-4 { background: #2a3a5c; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); margin-top: 14px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+  }
+  tbody td { padding: 9px 10px; border-bottom: 1px solid #18233b; }
+  tbody tr:hover { background: var(--panel-2); }
+  .rank { color: var(--muted); width: 26px; }
+  .team-cell { font-weight: 600; }
+  .team-cell .grp { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+  .prog-cell { position: relative; min-width: 80px; }
+  .prog-fill {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(74,214,168,0.18), rgba(74,214,168,0.05));
+    border-radius: 4px;
+    z-index: 0;
+  }
+  .prog-cell span { position: relative; z-index: 1; }
+  .champ-cell { color: var(--gold); font-weight: 700; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 16px; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🏆 WC 2026 Group Stage Simulator — Live Backend Output</h1>
+    <div class="sub">
+      Rendered straight from <code>simulator/simulate.py</code> (the Monte Carlo engine in
+      <code>wc_group_stage_calculator</code>), driven by the cached real ESPN standings + Elo ratings
+      already checked into <code>config/data_cache.json</code>.
+    </div>
+    <div class="badges">
+      <span class="badge"><b>10,000</b> simulations</span>
+      <span class="badge">model: <b>blend</b> (odds + Elo, weight 0.4)</span>
+      <span class="badge">source data cached: <b>2026-06-24T09:02:38</b></span>
+      <span class="badge">seed: <b>42</b> (reproducible)</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Group Stage — Finish Position Probabilities</h2>
+    <div class="groups-grid" id="groups"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>1st</span>
+      <span><i style="background:#5b9bf2"></i>2nd</span>
+      <span><i style="background:#9a7cf0"></i>3rd</span>
+      <span><i style="background:#2a3a5c"></i>4th</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Knockout Stage — Title Contenders</h2>
+    <table>
+      <thead>
+        <tr>
+          <th class="rank">#</th>
+          <th>Team</th>
+          <th>R32</th>
+          <th>R16</th>
+          <th>QF</th>
+          <th>SF</th>
+          <th>Final</th>
+          <th>Champion</th>
+        </tr>
+      </thead>
+      <tbody id="advancement"></tbody>
+    </table>
+  </section>
+
+  <footer>
+    Generated by running this repository's own simulator package against its committed cache
+    (no live network calls were made for this render — see notes below). Data is illustrative
+    Monte Carlo output, not a prediction guarantee.
+  </footer>
+</div>
+
+<script>
+const DATA = {"n_simulations": 10000, "cached_at": "2026-06-24T09:02:38", "groups": {"A": [{"id": "203", "name": "Mexico", "abbr": "MEX", "p1": 100.0, "p2": 0.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "451", "name": "South Korea", "abbr": "KOR", "p1": 0.0, "p2": 82.9, "p3": 13.0, "p4": 4.1, "r32": 94.1}, {"id": "467", "name": "South Africa", "abbr": "RSA", "p1": 0.0, "p2": 13.4, "p3": 21.1, "p4": 65.5, "r32": 17.1}, {"id": "450", "name": "Czechia", "abbr": "CZE", "p1": 0.0, "p2": 3.6, "p3": 65.9, "p4": 30.4, "r32": 25.0}], "B": [{"id": "475", "name": "Switzerland", "abbr": "SUI", "p1": 39.9, "p2": 60.1, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "206", "name": "Canada", "abbr": "CAN", "p1": 60.1, "p2": 39.7, "p3": 0.2, "p4": 0.0, "r32": 100.0}, {"id": "452", "name": "Bosnia-Herzegovina", "abbr": "BIH", "p1": 0.0, "p2": 0.2, "p3": 83.5, "p4": 16.4, "r32": 62.9}, {"id": "4398", "name": "Qatar", "abbr": "QAT", "p1": 0.0, "p2": 0.0, "p3": 16.4, "p4": 83.7, "r32": 16.3}], "C": [{"id": "2869", "name": "Morocco", "abbr": "MAR", "p1": 27.1, "p2": 72.2, "p3": 0.7, "p4": 0.0, "r32": 100.0}, {"id": "205", "name": "Brazil", "abbr": "BRA", "p1": 71.1, "p2": 22.0, "p3": 6.8, "p4": 0.0, "r32": 100.0}, {"id": "580", "name": "Scotland", "abbr": "SCO", "p1": 1.8, "p2": 5.8, "p3": 92.5, "p4": 0.0, "r32": 78.1}, {"id": "2654", "name": "Haiti", "abbr": "HAI", "p1": 0.0, "p2": 0.0, "p3": 0.0, "p4": 100.0, "r32": 0.0}], "D": [{"id": "660", "name": "United States", "abbr": "USA", "p1": 100.0, "p2": 0.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "628", "name": "Australia", "abbr": "AUS", "p1": 0.0, "p2": 64.4, "p3": 35.6, "p4": 0.0, "r32": 95.4}, {"id": "210", "name": "Paraguay", "abbr": "PAR", "p1": 0.0, "p2": 35.6, "p3": 64.4, "p4": 0.0, "r32": 88.3}, {"id": "465", "name": "T\u00fcrkiye", "abbr": "TUR", "p1": 0.0, "p2": 0.0, "p3": 0.0, "p4": 100.0, "r32": 0.0}], "E": [{"id": "481", "name": "Germany", "abbr": "GER", "p1": 100.0, "p2": 0.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "4789", "name": "Ivory Coast", "abbr": "CIV", "p1": 0.0, "p2": 93.5, "p3": 5.3, "p4": 1.2, "r32": 98.1}, {"id": "11678", "name": "Cura\u00e7ao", "abbr": "CUW", "p1": 0.0, "p2": 5.3, "p3": 9.4, "p4": 85.2, "r32": 6.5}, {"id": "209", "name": "Ecuador", "abbr": "ECU", "p1": 0.0, "p2": 1.2, "p3": 85.2, "p4": 13.6, "r32": 19.1}], "F": [{"id": "449", "name": "Netherlands", "abbr": "NED", "p1": 78.5, "p2": 21.1, "p3": 0.3, "p4": 0.0, "r32": 100.0}, {"id": "627", "name": "Japan", "abbr": "JPN", "p1": 17.9, "p2": 56.6, "p3": 25.6, "p4": 0.0, "r32": 100.0}, {"id": "466", "name": "Sweden", "abbr": "SWE", "p1": 3.6, "p2": 22.3, "p3": 74.1, "p4": 0.0, "r32": 95.0}, {"id": "659", "name": "Tunisia", "abbr": "TUN", "p1": 0.0, "p2": 0.0, "p3": 0.0, "p4": 100.0, "r32": 0.0}], "G": [{"id": "459", "name": "Belgium", "abbr": "BEL", "p1": 27.5, "p2": 56.5, "p3": 9.3, "p4": 6.7, "r32": 92.0}, {"id": "2620", "name": "Egypt", "abbr": "EGY", "p1": 55.5, "p2": 18.7, "p3": 25.8, "p4": 0.0, "r32": 100.0}, {"id": "469", "name": "Iran", "abbr": "IRN", "p1": 16.9, "p2": 19.4, "p3": 60.2, "p4": 3.4, "r32": 65.9}, {"id": "2666", "name": "New Zealand", "abbr": "NZL", "p1": 0.0, "p2": 5.3, "p3": 4.8, "p4": 89.9, "r32": 8.1}], "H": [{"id": "164", "name": "Spain", "abbr": "ESP", "p1": 90.8, "p2": 5.8, "p3": 3.4, "p4": 0.0, "r32": 100.0}, {"id": "2597", "name": "Cape Verde", "abbr": "CPV", "p1": 1.8, "p2": 57.2, "p3": 21.1, "p4": 19.8, "r32": 65.3}, {"id": "655", "name": "Saudi Arabia", "abbr": "KSA", "p1": 0.0, "p2": 32.3, "p3": 5.4, "p4": 62.3, "r32": 35.6}, {"id": "212", "name": "Uruguay", "abbr": "URU", "p1": 7.4, "p2": 4.7, "p3": 70.1, "p4": 17.8, "r32": 26.9}], "I": [{"id": "464", "name": "Norway", "abbr": "NOR", "p1": 15.0, "p2": 85.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "478", "name": "France", "abbr": "FRA", "p1": 85.0, "p2": 15.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "654", "name": "Senegal", "abbr": "SEN", "p1": 0.0, "p2": 0.0, "p3": 90.9, "p4": 9.1, "r32": 71.6}, {"id": "4375", "name": "Iraq", "abbr": "IRQ", "p1": 0.0, "p2": 0.0, "p3": 9.1, "p4": 90.9, "r32": 4.6}], "J": [{"id": "202", "name": "Argentina", "abbr": "ARG", "p1": 100.0, "p2": 0.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "474", "name": "Austria", "abbr": "AUT", "p1": 0.0, "p2": 75.3, "p3": 24.7, "p4": 0.0, "r32": 97.3}, {"id": "624", "name": "Algeria", "abbr": "ALG", "p1": 0.0, "p2": 24.7, "p3": 75.3, "p4": 0.0, "r32": 81.9}, {"id": "2917", "name": "Jordan", "abbr": "JOR", "p1": 0.0, "p2": 0.0, "p3": 0.0, "p4": 100.0, "r32": 0.0}], "K": [{"id": "208", "name": "Colombia", "abbr": "COL", "p1": 45.0, "p2": 55.0, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "482", "name": "Portugal", "abbr": "POR", "p1": 55.0, "p2": 44.8, "p3": 0.2, "p4": 0.0, "r32": 100.0}, {"id": "2850", "name": "Congo DR", "abbr": "COD", "p1": 0.0, "p2": 0.2, "p3": 68.5, "p4": 31.3, "r32": 45.7}, {"id": "2570", "name": "Uzbekistan", "abbr": "UZB", "p1": 0.0, "p2": 0.0, "p3": 31.3, "p4": 68.7, "r32": 11.4}], "L": [{"id": "448", "name": "England", "abbr": "ENG", "p1": 90.6, "p2": 9.4, "p3": 0.0, "p4": 0.0, "r32": 100.0}, {"id": "477", "name": "Croatia", "abbr": "CRO", "p1": 6.8, "p2": 55.5, "p3": 37.8, "p4": 0.0, "r32": 97.8}, {"id": "4469", "name": "Ghana", "abbr": "GHA", "p1": 2.7, "p2": 35.1, "p3": 62.2, "p4": 0.0, "r32": 100.0}, {"id": "2659", "name": "Panama", "abbr": "PAN", "p1": 0.0, "p2": 0.0, "p3": 0.0, "p4": 100.0, "r32": 0.0}]}, "advancement": [{"id": "164", "name": "Spain", "abbr": "ESP", "group": "H", "r32": 100.0, "r16": 89.7, "qf": 69.5, "sf": 55.0, "final": 35.4, "champion": 35.4}, {"id": "478", "name": "France", "abbr": "FRA", "group": "I", "r32": 100.0, "r16": 70.2, "qf": 40.8, "sf": 30.2, "final": 17.1, "champion": 17.1}, {"id": "202", "name": "Argentina", "abbr": "ARG", "group": "J", "r32": 100.0, "r16": 70.0, "qf": 41.1, "sf": 32.1, "final": 16.8, "champion": 16.8}, {"id": "448", "name": "England", "abbr": "ENG", "group": "L", "r32": 100.0, "r16": 72.2, "qf": 28.4, "sf": 17.6, "final": 8.1, "champion": 8.1}, {"id": "482", "name": "Portugal", "abbr": "POR", "group": "K", "r32": 100.0, "r16": 69.2, "qf": 51.0, "sf": 16.9, "final": 6.8, "champion": 6.8}, {"id": "449", "name": "Netherlands", "abbr": "NED", "group": "F", "r32": 100.0, "r16": 60.2, "qf": 47.2, "sf": 15.4, "final": 5.6, "champion": 5.6}, {"id": "205", "name": "Brazil", "abbr": "BRA", "group": "C", "r32": 100.0, "r16": 37.5, "qf": 22.9, "sf": 12.6, "final": 5.3, "champion": 5.3}, {"id": "481", "name": "Germany", "abbr": "GER", "group": "E", "r32": 100.0, "r16": 35.5, "qf": 12.1, "sf": 8.0, "final": 3.0, "champion": 3.0}, {"id": "208", "name": "Colombia", "abbr": "COL", "group": "K", "r32": 100.0, "r16": 39.0, "qf": 11.5, "sf": 1.8, "final": 0.4, "champion": 0.4}, {"id": "203", "name": "Mexico", "abbr": "MEX", "group": "A", "r32": 100.0, "r16": 22.1, "qf": 4.0, "sf": 1.4, "final": 0.3, "champion": 0.3}, {"id": "660", "name": "United States", "abbr": "USA", "group": "D", "r32": 100.0, "r16": 49.3, "qf": 16.8, "sf": 2.1, "final": 0.3, "champion": 0.3}, {"id": "464", "name": "Norway", "abbr": "NOR", "group": "I", "r32": 100.0, "r16": 23.3, "qf": 8.2, "sf": 1.2, "final": 0.3, "champion": 0.3}, {"id": "477", "name": "Croatia", "abbr": "CRO", "group": "L", "r32": 97.8, "r16": 20.2, "qf": 6.9, "sf": 1.0, "final": 0.2, "champion": 0.2}, {"id": "475", "name": "Switzerland", "abbr": "SUI", "group": "B", "r32": 100.0, "r16": 12.8, "qf": 3.4, "sf": 0.7, "final": 0.1, "champion": 0.1}, {"id": "627", "name": "Japan", "abbr": "JPN", "group": "F", "r32": 100.0, "r16": 7.8, "qf": 3.5, "sf": 0.5, "final": 0.1, "champion": 0.1}]};
+
+function bar(pct, seg) {
+  return `<div class="bar-seg seg-${seg}" style="width:${pct}%"></div>`;
+}
+
+const groupsEl = document.getElementById("groups");
+const groupOrder = Object.keys(DATA.groups).sort();
+for (const g of groupOrder) {
+  const rows = DATA.groups[g];
+  const card = document.createElement("div");
+  card.className = "group-card";
+  let rowsHtml = "";
+  for (const t of rows) {
+    rowsHtml += `
+      <div class="team-row">
+        <div class="meta"><span class="name">${t.name}</span><span class="pct">${t.abbr} · R32 ${t.r32}%</span></div>
+        <div class="bar-track">${bar(t.p1,1)}${bar(t.p2,2)}${bar(t.p3,3)}${bar(t.p4,4)}</div>
+      </div>`;
+  }
+  card.innerHTML = `<h3>GROUP ${g}</h3>${rowsHtml}`;
+  groupsEl.appendChild(card);
+}
+
+const tbody = document.getElementById("advancement");
+DATA.advancement.forEach((t, i) => {
+  const tr = document.createElement("tr");
+  const cell = (pct) => `<td class="prog-cell"><div class="prog-fill" style="right:${100-pct}%"></div><span>${pct}%</span></td>`;
+  tr.innerHTML = `
+    <td class="rank">${i+1}</td>
+    <td class="team-cell">${t.name}<span class="grp">GRP ${t.group}</span></td>
+    ${cell(t.r32)}${cell(t.r16)}${cell(t.qf)}${cell(t.sf)}${cell(t.final)}
+    <td class="champ-cell">${t.champion}%</td>
+  `;
+  tbody.appendChild(tr);
+});
+</script>
+</body>
+</html>
